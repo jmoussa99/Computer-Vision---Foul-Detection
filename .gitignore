@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.DS_Store
+data/
+outputs/
+models/
+*.pth
+*.pth.tar
+*.zip
