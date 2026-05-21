@@ -19,6 +19,6 @@ def test_extract_clip_features_from_synthetic_video(tmp_path: Path) -> None:
     features = extractor.extract_clip(video_path)
 
     assert features["frames_sampled"] == 12
-    assert features["edge_density_mean"] > 0
     assert features["motion_mean"] > 0
     assert features["tracked_objects"] >= 1
+    assert "possible_contacts_mean" in features

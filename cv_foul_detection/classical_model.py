@@ -1,4 +1,4 @@
-"""Classical ML baseline over extracted CV descriptors."""
+"""Classical ML baseline over visual tracking/contact descriptors."""
 
 from __future__ import annotations
 
@@ -12,39 +12,21 @@ from sklearn.metrics import accuracy_score, classification_report
 
 
 CORE_CLIP_FEATURES = (
-    "edge_density_mean",
-    "edge_density_std",
     "motion_mean",
     "motion_p95_mean",
     "close_interactions_mean",
+    "possible_contacts_mean",
     "interaction_min_distance_mean",
     "close_motion_p95_mean",
-    "orb_keypoints_mean",
     "tracked_objects",
     "long_tracks",
     "track_length_mean",
 )
 
-EDGE_BASELINE_FEATURES = (
-    "edge_density_mean",
-    "edge_density_std",
-)
-
 FEATURE_SETS = {
     "core": {
         "clip_features": CORE_CLIP_FEATURES,
-        "include_local_matches": True,
-        "description": "Recommended classical CV set: edge baseline, motion, tracking, and local multi-view matches.",
-    },
-    "motion_tracking_local": {
-        "clip_features": tuple(feature for feature in CORE_CLIP_FEATURES if not feature.startswith("edge_")),
-        "include_local_matches": True,
-        "description": "Main foul-analysis signals without the edge baseline.",
-    },
-    "edge_baseline": {
-        "clip_features": EDGE_BASELINE_FEATURES,
-        "include_local_matches": False,
-        "description": "Simple edge-only baseline for comparison.",
+        "description": "Visual foul-analysis set: motion, tracked movement, close interactions, and possible-contact cues.",
     },
 }
 
@@ -160,20 +142,7 @@ def _vectorize(payload: dict[str, Any], feature_set: str) -> list[float]:
         return [0.0] * len(_feature_names(feature_set))
 
     clip_array = np.asarray(clip_vectors, dtype=np.float32)
-    values = [clip_array.mean(axis=0), clip_array.max(axis=0)]
-    if settings["include_local_matches"]:
-        local = payload.get("multi_view", {}).get("local_features", {})
-        values.append(
-            np.asarray(
-                [
-                    float(local.get("matches", 0.0)),
-                    float(local.get("inliers", 0.0)),
-                    float(local.get("inliers", 0.0)) / max(float(local.get("matches", 0.0)), 1.0),
-                ],
-                dtype=np.float32,
-            )
-        )
-    return np.concatenate(values).tolist()
+    return np.concatenate([clip_array.mean(axis=0), clip_array.max(axis=0)]).tolist()
 
 
 def _feature_names(feature_set: str) -> list[str]:
@@ -181,8 +150,6 @@ def _feature_names(feature_set: str) -> list[str]:
     clip_feature_keys = settings["clip_features"]
     names = [f"mean_{key}" for key in clip_feature_keys]
     names.extend(f"max_{key}" for key in clip_feature_keys)
-    if settings["include_local_matches"]:
-        names.extend(["local_matches", "local_inliers", "local_inlier_ratio"])
     return names
 
 

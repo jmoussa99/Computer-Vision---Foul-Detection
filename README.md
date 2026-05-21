@@ -81,23 +81,14 @@ The foul usually occurs around the 75th frame. You can trim the clips by using -
 
 ## Classical computer vision extension
 
-This fork also includes a classical CV pipeline for interpretable foul-analysis
-features alongside the VARS baseline. The default foul classifier uses the
-recommended core set:
+This fork also includes a focused visual CV pipeline for tracking player
+movement and highlighting likely contact moments alongside the VARS baseline.
+The active CV pipeline uses:
 
 * 2D motion analysis with dense optical flow.
 * Moving-object tracking with foreground masks and centroid association.
 * Contact-proxy interaction cues from close tracked objects and motion spikes.
-* ORB local visual features and cross-view matching.
-
-Canny edge detection is kept as a simple baseline signal inside the default
-feature set and can also be evaluated by itself with `--feature-set
-edge_baseline`. These techniques are implemented as optional experiments, not
-required for the default classifier:
-
-* Image stitching with homography estimation.
-* Camera calibration and pose estimation from chessboard images.
-* Stereo disparity maps for paired views.
+* Annotated overlay videos for visual inspection.
 
 Install the added dependencies from the repository root:
 
@@ -140,9 +131,9 @@ python scripts/extract_cv_features.py \
   --visualize
 ```
 
-See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for the
-camera-calibration command and output details. After extracting full Train and
-Valid features, train a classical RandomForest foul classifier with:
+See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for visual
+overlay details. After extracting full Train and Valid features, train a
+classical RandomForest foul classifier with:
 
 ```
 python scripts/train_classical_cv.py \

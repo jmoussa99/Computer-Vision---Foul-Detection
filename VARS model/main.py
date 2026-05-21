@@ -349,7 +349,7 @@ if __name__ == '__main__':
     parser.add_argument("--only_evaluation", required=False, type=int, default=3, help="Only evaluation, 0 = on test set, 1 = on chall set, 2 = on both sets and 3 = train/valid/test")
     parser.add_argument("--path_to_model_weights", required=False, type=str, default="", help="Path to the model weights")
     parser.add_argument("--cv_features_path", required=False, type=str, default="", help="Path to extracted CV features from scripts/extract_cv_features.py. Enables late fusion when set.")
-    parser.add_argument("--cv_feature_set", required=False, type=str, default="core", help="CV feature set for fusion: core, motion_tracking_local, or edge_baseline")
+    parser.add_argument("--cv_feature_set", required=False, type=str, default="core", help="CV feature set for fusion. The visual tracking/contact pipeline currently provides: core")
 
     args = parser.parse_args()
 
