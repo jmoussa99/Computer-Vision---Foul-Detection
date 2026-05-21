@@ -23,13 +23,23 @@ def main() -> int:
     parser.add_argument("--max-frames", type=int, default=125)
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--resize-width", type=int, default=640)
-    parser.add_argument("--visualize", action="store_true", help="Save overlay videos for each sampled clip.")
+    parser.add_argument("--visualize", action="store_true", help="Save annotated tracking/contact videos for each sampled clip.")
+    parser.add_argument("--contact-distance-ratio", type=float, default=0.08, help="Normalized distance threshold for drawing close interaction/contact lines.")
+    parser.add_argument("--contact-motion-p95", type=float, default=8.0, help="Optical-flow p95 threshold for labeling a close interaction as possible contact.")
     parser.add_argument("--stitch", action="store_true", help="Estimate homography and save a first-frame panorama for clip_0/clip_1.")
     parser.add_argument("--stereo", action="store_true", help="Save a first-frame stereo disparity map for clip_0/clip_1.")
     args = parser.parse_args()
 
     output = Path(args.output)
-    extractor = ClipFeatureExtractor(FeatureConfig(max_frames=args.max_frames, frame_stride=args.frame_stride, resize_width=args.resize_width))
+    extractor = ClipFeatureExtractor(
+        FeatureConfig(
+            max_frames=args.max_frames,
+            frame_stride=args.frame_stride,
+            resize_width=args.resize_width,
+            contact_distance_ratio=args.contact_distance_ratio,
+            contact_motion_p95=args.contact_motion_p95,
+        )
+    )
     actions = iter_actions(args.dataset, args.splits)
     processed = 0
     index = []

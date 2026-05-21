@@ -123,6 +123,12 @@ python scripts/extract_cv_features.py \
   --visualize
 ```
 
+The overlay videos visually show movement and likely contact: green tracking
+boxes/IDs, white trails, orange close-interaction lines, and red `POSSIBLE
+CONTACT` highlights when close interaction happens with a motion spike. Tune
+the visual contact sensitivity with `--contact-distance-ratio` and
+`--contact-motion-p95`.
+
 For the full SoccerNet-MVFoul dataset, use the unzipped dataset root containing
 `Train`, `Valid`, `Test`, and `Chall`:
 

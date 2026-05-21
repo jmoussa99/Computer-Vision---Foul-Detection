@@ -1,8 +1,8 @@
 # Classical CV Pipeline for SoccerNet-MVFoul
 
-This project keeps the upstream VARS multi-view deep model and adds a classical
-computer-vision pipeline for interpretable foul-analysis signals. The default
-classifier uses the recommended core set:
+This project keeps the upstream VARS multi-view deep model and adds a visual
+computer-vision pipeline for tracking player movement and highlighting likely
+contact moments. The default classifier uses the same core signals:
 
 - 2D motion analysis: dense Farneback optical-flow magnitude statistics.
 - Object tracking: motion-mask detections linked with a centroid tracker.
@@ -24,7 +24,7 @@ experiments:
 Do not hard-code the SoccerNet password. Use an environment variable:
 
 ```bash
-export SOCCERNET_PASSWORD='s0cc3rn3t'
+export SOCCERNET_PASSWORD=''
 python scripts/download_mvfoul.py --output data/SoccerNet --version 720p
 ```
 
@@ -42,6 +42,27 @@ python scripts/extract_cv_features.py \
   --output outputs/interface_cv \
   --max-actions 5 \
   --visualize
+```
+
+The `--visualize` overlays are the main visual deliverable. They draw:
+
+- green boxes and IDs around moving player/object regions,
+- white motion trails for each tracked region,
+- orange lines when two moving regions are close,
+- red lines and a `POSSIBLE CONTACT` banner when closeness coincides with a
+  strong optical-flow motion spike.
+
+Tune the contact display with:
+
+```bash
+python scripts/extract_cv_features.py \
+  --dataset "VARS interface/dataset" \
+  --splits . \
+  --output outputs/contact_demo \
+  --max-actions 1 \
+  --visualize \
+  --contact-distance-ratio 0.10 \
+  --contact-motion-p95 6.0
 ```
 
 Run on the full MVFoul data:
