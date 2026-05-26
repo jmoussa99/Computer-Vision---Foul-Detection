@@ -18,7 +18,7 @@ class FeatureConfig:
     min_track_area: int = 180
     contact_distance_ratio: float = 0.08
     contact_motion_p95: float = 8.0
-    trail_length: int = 24
+    contact_pause_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,8 @@ class ClipFeatureExtractor:
         close_motion_p95: list[float] = []
         frame_count = 0
         sampled = 0
+        previous_contact = False
+        output_fps = 1.0
 
         while sampled < self.config.max_frames:
             ok, frame = cap.read()
@@ -142,13 +144,19 @@ class ClipFeatureExtractor:
                 if writer is None:
                     overlay_path = Path(overlay_path)
                     overlay_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_fps = max(cap.get(cv2.CAP_PROP_FPS) / self.config.frame_stride, 1)
                     writer = cv2.VideoWriter(
                         str(overlay_path),
                         cv2.VideoWriter_fourcc(*"mp4v"),
-                        max(cap.get(cv2.CAP_PROP_FPS) / self.config.frame_stride, 1),
+                        output_fps,
                         (frame.shape[1], frame.shape[0]),
                     )
-                writer.write(self._overlay(frame, tracks, tracker.tracks, interaction_cues, p95))
+                overlay = self._overlay(frame, tracks, interaction_cues)
+                writer.write(overlay)
+                if contact_count > 0 and not previous_contact:
+                    for _ in range(int(round(output_fps * self.config.contact_pause_seconds))):
+                        writer.write(overlay)
+                previous_contact = contact_count > 0
 
         cap.release()
         if writer is not None:
@@ -223,47 +231,19 @@ class ClipFeatureExtractor:
         self,
         frame: np.ndarray,
         tracks: dict[int, MotionDetection],
-        histories: dict[int, list[tuple[float, float]]],
         interaction_cues: list[InteractionCue],
-        motion_p95: float,
     ) -> np.ndarray:
         overlay = frame.copy()
-
-        for object_id, detection in tracks.items():
-            x, y, w, h = detection.bbox
-            center = (int(detection.centroid[0]), int(detection.centroid[1]))
-            cv2.rectangle(overlay, (x, y), (x + w, y + h), (46, 204, 113), 2)
-            cv2.circle(overlay, center, 4, (46, 204, 113), -1)
-            cv2.putText(overlay, f"P{object_id}", (x, max(16, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (46, 204, 113), 1)
-
-            history = histories.get(object_id, [])[-self.config.trail_length :]
-            for first, second in zip(history, history[1:]):
-                cv2.line(overlay, (int(first[0]), int(first[1])), (int(second[0]), int(second[1])), (255, 255, 255), 2)
-
-        possible_contacts = 0
         for cue in interaction_cues:
+            if not cue.possible_contact:
+                continue
             first = tracks.get(cue.first_id)
             second = tracks.get(cue.second_id)
             if first is None or second is None:
                 continue
             first_center = (int(first.centroid[0]), int(first.centroid[1]))
             second_center = (int(second.centroid[0]), int(second.centroid[1]))
-            color = (0, 0, 255) if cue.possible_contact else (0, 165, 255)
-            thickness = 4 if cue.possible_contact else 2
-            cv2.line(overlay, first_center, second_center, color, thickness)
-            label_pos = ((first_center[0] + second_center[0]) // 2, (first_center[1] + second_center[1]) // 2)
-            label = "possible contact" if cue.possible_contact else "close"
-            cv2.putText(overlay, label, (label_pos[0] + 6, label_pos[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
-            if cue.possible_contact:
-                possible_contacts += 1
-
-        status = f"motion p95={motion_p95:.1f} | close pairs={len(interaction_cues)} | possible contact={possible_contacts}"
-        cv2.rectangle(overlay, (8, 8), (min(frame.shape[1] - 8, 560), 40), (0, 0, 0), -1)
-        cv2.putText(overlay, status, (16, 31), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-        if possible_contacts:
-            cv2.rectangle(overlay, (8, 46), (240, 78), (0, 0, 180), -1)
-            cv2.putText(overlay, "POSSIBLE CONTACT", (18, 69), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
+            cv2.line(overlay, first_center, second_center, (0, 0, 255), 5)
         return overlay
 
 

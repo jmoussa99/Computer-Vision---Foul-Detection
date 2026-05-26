@@ -51,11 +51,8 @@ per clip. `outputs/cv_features/index.json` lists all processed actions.
 
 The overlay videos draw:
 
-- green boxes and IDs around moving player/object regions,
-- white motion trails for each tracked region,
-- orange lines when two tracked regions are close,
-- red lines and a `POSSIBLE CONTACT` banner when closeness coincides with a
-  strong optical-flow motion spike.
+- red lines only when the pipeline sees a possible contact cue,
+- a one-second freeze on the first frame of each new possible-contact event.
 
 ## Contact Sensitivity
 
@@ -65,6 +62,8 @@ Use these two knobs to make the visualization stricter or looser:
   regions. Larger values create more close/contact candidates.
 - `--contact-motion-p95`: optical-flow motion-spike threshold. Lower values
   label more close interactions as possible contact.
+- `--contact-pause-seconds`: how long the output overlay video freezes when a
+  new possible-contact event begins.
 
 Example stricter contact display:
 
@@ -76,7 +75,8 @@ python scripts/extract_cv_features.py \
   --max-actions 1 \
   --visualize \
   --contact-distance-ratio 0.07 \
-  --contact-motion-p95 10.0
+  --contact-motion-p95 10.0 \
+  --contact-pause-seconds 1.0
 ```
 
 ## Foul Detection Model Fusion
