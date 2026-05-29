@@ -16,7 +16,21 @@ from cv_foul_detection.classical_model import feature_dim, vectorize_payload
 
 
 class MultiViewDataset(Dataset):
-    def __init__(self, path, start, end, fps, split, num_views, transform=None, transform_model=None, cv_features_path="", cv_feature_set="core"):
+    def __init__(
+        self,
+        path,
+        start,
+        end,
+        fps,
+        split,
+        num_views,
+        transform=None,
+        transform_model=None,
+        cv_features_path="",
+        cv_feature_set="core",
+        sample_frames=None,
+        temporal_stride=2,
+    ):
 
         if split != 'Chall':
             # To load the annotations
@@ -56,8 +70,13 @@ class MultiViewDataset(Dataset):
         self.cv_features_path = Path(cv_features_path) if cv_features_path else None
         self.cv_feature_set = cv_feature_set
         self.cv_feature_dim = feature_dim(cv_feature_set) if self.cv_features_path else 0
+        self.sample_frames = sample_frames
+        self.temporal_stride = temporal_stride
 
-        self.factor = (end - start) / (((end - start) / 25) * fps)
+        if self.sample_frames is None:
+            self.factor = (end - start) / (((end - start) / 25) * fps)
+        else:
+            self.factor = None
 
         self.length = len(self.clips)
         print(self.length)
@@ -80,6 +99,7 @@ class MultiViewDataset(Dataset):
     def __getitem__(self, index):
 
         prev_views = []
+        view_ids = []
 
         for num_view in range(len(self.clips[index])):
 
@@ -99,25 +119,30 @@ class MultiViewDataset(Dataset):
                 index_view = aux
                 prev_views.append(index_view)
 
+            view_ids.append(index_view)
 
             video, _, _ = read_video(self.clips[index][index_view], output_format="THWC")
-            frames = video[self.start:self.end,:,:,:]
-
-            final_frames = None
-
-            for j in range(len(frames)):
-                if j%self.factor<1:
-                    if final_frames == None:
-                        final_frames = frames[j,:,:,:].unsqueeze(0)
-                    else:
-                        final_frames = torch.cat((final_frames, frames[j,:,:,:].unsqueeze(0)), 0)
+            if self.sample_frames is None:
+                frames = video[self.start:self.end,:,:,:]
+                final_frames = None
+                for j in range(len(frames)):
+                    if j%self.factor<1:
+                        if final_frames == None:
+                            final_frames = frames[j,:,:,:].unsqueeze(0)
+                        else:
+                            final_frames = torch.cat((final_frames, frames[j,:,:,:].unsqueeze(0)), 0)
+            else:
+                indices = self.start + torch.arange(self.sample_frames) * self.temporal_stride
+                indices = torch.clamp(indices, max=max(video.shape[0] - 1, 0)).long()
+                final_frames = video[indices,:,:,:]
 
             final_frames = final_frames.permute(0, 3, 1, 2)
 
             if self.transform != None:
                 final_frames = self.transform(final_frames)
 
-            final_frames = self.transform_model(final_frames)
+            if self.transform_model != None:
+                final_frames = self.transform_model(final_frames)
             final_frames = final_frames.permute(1, 0, 2, 3)
             
             if num_view == 0:
@@ -130,17 +155,18 @@ class MultiViewDataset(Dataset):
             videos = videos.squeeze()   
 
         videos = videos.permute(0, 2, 1, 3, 4)
+        view_ids = torch.tensor(view_ids, dtype=torch.long)
 
         if self.split != 'Chall':
             action_id = self.number_of_actions[index]
             if self.cv_features_path:
-                return self.labels_offence_severity[index][0], self.labels_action[index][0], videos, self._load_cv_features(action_id), action_id
-            return self.labels_offence_severity[index][0], self.labels_action[index][0], videos, action_id
+                return self.labels_offence_severity[index][0], self.labels_action[index][0], videos, self._load_cv_features(action_id), view_ids, action_id
+            return self.labels_offence_severity[index][0], self.labels_action[index][0], videos, view_ids, action_id
         else:
             action_id = str(index)
             if self.cv_features_path:
-                return -1, -1, videos, self._load_cv_features(action_id), action_id
-            return -1, -1, videos, action_id
+                return -1, -1, videos, self._load_cv_features(action_id), view_ids, action_id
+            return -1, -1, videos, view_ids, action_id
 
     def __len__(self):
         return self.length

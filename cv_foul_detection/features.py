@@ -16,9 +16,12 @@ class FeatureConfig:
     frame_stride: int = 2
     resize_width: int = 640
     min_track_area: int = 180
+    min_contact_area: int = 450
+    field_top_ratio: float = 0.18
     contact_distance_ratio: float = 0.08
     contact_motion_p95: float = 8.0
     contact_pause_seconds: float = 1.0
+    contact_box_padding: int = 12
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,10 @@ class ClipFeatureExtractor:
         track_items = list(tracks.items())
         for idx, (first_id, first) in enumerate(track_items[:-1]):
             for second_id, second in track_items[idx + 1 :]:
+                if first.area < self.config.min_contact_area or second.area < self.config.min_contact_area:
+                    continue
+                if not self._in_playing_area(first, shape) or not self._in_playing_area(second, shape):
+                    continue
                 distance = float(np.linalg.norm(np.array(first.centroid) - np.array(second.centroid)) / diagonal)
                 if distance <= self.config.contact_distance_ratio:
                     cues.append(
@@ -226,6 +233,9 @@ class ClipFeatureExtractor:
                         )
                     )
         return cues
+
+    def _in_playing_area(self, detection: MotionDetection, shape: tuple[int, ...]) -> bool:
+        return detection.centroid[1] >= shape[0] * self.config.field_top_ratio
 
     def _overlay(
         self,
@@ -241,10 +251,19 @@ class ClipFeatureExtractor:
             second = tracks.get(cue.second_id)
             if first is None or second is None:
                 continue
-            first_center = (int(first.centroid[0]), int(first.centroid[1]))
-            second_center = (int(second.centroid[0]), int(second.centroid[1]))
-            cv2.line(overlay, first_center, second_center, (0, 0, 255), 5)
+            x1, y1, x2, y2 = self._contact_box(first, second, frame.shape)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 4)
         return overlay
+
+    def _contact_box(self, first: MotionDetection, second: MotionDetection, shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+        fx, fy, fw, fh = first.bbox
+        sx, sy, sw, sh = second.bbox
+        padding = self.config.contact_box_padding
+        x1 = max(min(fx, sx) - padding, 0)
+        y1 = max(min(fy, sy) - padding, 0)
+        x2 = min(max(fx + fw, sx + sw) + padding, shape[1] - 1)
+        y2 = min(max(fy + fh, sy + sh) + padding, shape[0] - 1)
+        return x1, y1, x2, y2
 
 
 def _safe_mean(values: list[float] | list[int]) -> float:

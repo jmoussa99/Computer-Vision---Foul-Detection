@@ -145,19 +145,21 @@ def train(dataloader,
     if True:
         for batch in dataloader:
 
-            targets_offence_severity, targets_action, mvclips, cv_features, action = _unpack_batch(batch)
+            targets_offence_severity, targets_action, mvclips, cv_features, view_ids, action = _unpack_batch(batch)
 
             targets_offence_severity = targets_offence_severity.cuda()
             targets_action = targets_action.cuda()
             mvclips = mvclips.cuda().float()
             if cv_features is not None:
                 cv_features = cv_features.cuda().float()
+            if view_ids is not None:
+                view_ids = view_ids.cuda()
             
             if pbar is not None:
                 pbar.update()
 
             # compute output
-            outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features)
+            outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features, view_ids)
             
             if len(action) == 1:
                 preds_sev = torch.argmax(outputs_offence_severity, 0)
@@ -250,12 +252,14 @@ def evaluation(dataloader,
     if True:
         for batch in dataloader:
 
-            _, _, mvclips, cv_features, action = _unpack_batch(batch)
+            _, _, mvclips, cv_features, view_ids, action = _unpack_batch(batch)
             mvclips = mvclips.cuda().float()
             if cv_features is not None:
                 cv_features = cv_features.cuda().float()
+            if view_ids is not None:
+                view_ids = view_ids.cuda()
             #mvclips = mvclips.float()
-            outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features)
+            outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features, view_ids)
 
             if len(action) == 1:
                 preds_sev = torch.argmax(outputs_offence_severity, 0)
@@ -308,8 +312,11 @@ def evaluation(dataloader,
 
 
 def _unpack_batch(batch):
+    if len(batch) == 6:
+        targets_offence_severity, targets_action, mvclips, cv_features, view_ids, action = batch
+        return targets_offence_severity, targets_action, mvclips, cv_features, view_ids, action
     if len(batch) == 5:
-        targets_offence_severity, targets_action, mvclips, cv_features, action = batch
-        return targets_offence_severity, targets_action, mvclips, cv_features, action
+        targets_offence_severity, targets_action, mvclips, view_ids, action = batch
+        return targets_offence_severity, targets_action, mvclips, None, view_ids, action
     targets_offence_severity, targets_action, mvclips, action = batch
-    return targets_offence_severity, targets_action, mvclips, None, action
+    return targets_offence_severity, targets_action, mvclips, None, None, action

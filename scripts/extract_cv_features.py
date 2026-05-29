@@ -24,9 +24,12 @@ def main() -> int:
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--resize-width", type=int, default=640)
     parser.add_argument("--visualize", action="store_true", help="Save annotated tracking/contact videos for each sampled clip.")
-    parser.add_argument("--contact-distance-ratio", type=float, default=0.08, help="Normalized distance threshold for drawing close interaction/contact lines.")
+    parser.add_argument("--min-contact-area", type=int, default=450, help="Ignore tiny motion fragments below this area when deciding possible contact.")
+    parser.add_argument("--field-top-ratio", type=float, default=0.18, help="Ignore contact candidates whose center is above this fraction of frame height.")
+    parser.add_argument("--contact-distance-ratio", type=float, default=0.08, help="Normalized distance threshold for drawing possible-contact boxes.")
     parser.add_argument("--contact-motion-p95", type=float, default=8.0, help="Optical-flow p95 threshold for labeling a close interaction as possible contact.")
     parser.add_argument("--contact-pause-seconds", type=float, default=1.0, help="Freeze the overlay video for this many seconds when a new possible contact begins.")
+    parser.add_argument("--contact-box-padding", type=int, default=12, help="Pixel padding around possible-contact boxes.")
     args = parser.parse_args()
 
     output = Path(args.output)
@@ -35,9 +38,12 @@ def main() -> int:
             max_frames=args.max_frames,
             frame_stride=args.frame_stride,
             resize_width=args.resize_width,
+            min_contact_area=args.min_contact_area,
+            field_top_ratio=args.field_top_ratio,
             contact_distance_ratio=args.contact_distance_ratio,
             contact_motion_p95=args.contact_motion_p95,
             contact_pause_seconds=args.contact_pause_seconds,
+            contact_box_padding=args.contact_box_padding,
         )
     )
     actions = iter_actions(args.dataset, args.splits)

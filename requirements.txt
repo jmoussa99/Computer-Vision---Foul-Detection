@@ -8,3 +8,4 @@ torchvision==0.14.1
 tqdm==4.65.0
 opencv-python>=4.8
 SoccerNet>=0.1.62
+timm>=0.9.12

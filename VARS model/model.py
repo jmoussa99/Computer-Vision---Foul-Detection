@@ -2,6 +2,7 @@
 import __future__
 import torch
 from mvaggregate import MVAggregate
+from tadaformer import TadaFormerL14MVNetwork
 from torchvision.models.video import r3d_18, R3D_18_Weights, MC3_18_Weights, mc3_18
 from torchvision.models.video import r2plus1d_18, R2Plus1D_18_Weights, s3d, S3D_Weights
 from torchvision.models.video import mvit_v2_s, MViT_V2_S_Weights, mvit_v1_b, MViT_V1_B_Weights
@@ -10,13 +11,23 @@ from torchvision.models.video import mvit_v2_s, MViT_V2_S_Weights, mvit_v1_b, MV
 
 class MVNetwork(torch.nn.Module):
 
-    def __init__(self, net_name='r2plus1d_18', agr_type='max', lifting_net=torch.nn.Sequential(), cv_feat_dim=0):
+    def __init__(self, net_name='r2plus1d_18', agr_type='max', lifting_net=torch.nn.Sequential(), cv_feat_dim=0, tada_pretrained=True, tada_input_size=(280, 490), tada_timm_model="vit_large_patch14_clip_224.openai"):
         super().__init__()
 
         self.net_name = net_name
         self.agr_type = agr_type
         self.lifting_net = lifting_net
         self.cv_feat_dim = cv_feat_dim
+        self.is_tadaformer = net_name == "tadaformer_l14"
+
+        if self.is_tadaformer:
+            self.mvnetwork = TadaFormerL14MVNetwork(
+                pretrained=tada_pretrained,
+                input_size=tada_input_size,
+                cv_feat_dim=cv_feat_dim,
+                timm_model=tada_timm_model,
+            )
+            return
         
         self.feat_dim = 512
 
@@ -51,5 +62,16 @@ class MVNetwork(torch.nn.Module):
             cv_feat_dim=self.cv_feat_dim,
         )
 
-    def forward(self, mvimages, cv_features=None):
+    def forward(self, mvimages, cv_features=None, view_ids=None):
+        if self.is_tadaformer:
+            return self.mvnetwork(mvimages, cv_features=cv_features, view_ids=view_ids)
         return self.mvnetwork(mvimages, cv_features=cv_features)
+
+    def extract_features(self, mvimages, cv_features=None, view_ids=None):
+        if not self.is_tadaformer:
+            raise NotImplementedError("Feature extraction is currently implemented for tadaformer_l14.")
+        return self.mvnetwork.extract_features(mvimages, cv_features=cv_features, view_ids=view_ids)
+
+    def freeze_backbone(self):
+        if self.is_tadaformer:
+            self.mvnetwork.freeze_backbone()

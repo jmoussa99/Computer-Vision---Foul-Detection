@@ -79,16 +79,21 @@ python main.py --pooling_type "attention" --start_frame 63 --end_frame 87 --fps 
 
 The foul usually occurs around the 75th frame. You can trim the clips by using --start_frame or --end_frame to capture only the frames where the foul takes place.
 
-## Classical computer vision extension
+## Deep-first foul recognition and contact boxes
 
-This fork also includes a focused visual CV pipeline for tracking player
-movement and highlighting likely contact moments alongside the VARS baseline.
-The active CV pipeline uses:
+This fork flips the earlier CV-first design. The foul decision now comes from a
+VARS-style deep multi-view video model, and the red contact boxes are a visual
+review layer for actions predicted as fouls.
 
-* 2D motion analysis with dense optical flow.
-* Moving-object tracking with foreground masks and centroid association.
-* Contact-proxy interaction cues from close tracked objects and motion spikes.
-* Annotated overlay videos for visual inspection.
+The `tadaformer_l14` path implements the requested TAdaFormer-L/14-style setup:
+
+* 16 frames per view.
+* Temporal stride of 2, giving a 32-frame context window.
+* Input size `280x490`.
+* Random two-view sampling for training.
+* All available views for validation/test.
+* Learnable live/replay view embeddings before max pooling.
+* Max pooling before the offence/severity and action heads.
 
 Install the added dependencies from the repository root:
 
@@ -99,63 +104,39 @@ pip install -r requirements.txt
 Download the MVFoul data without hard-coding the password:
 
 ```
-export SOCCERNET_PASSWORD="s0cc3rn3t"
+export SOCCERNET_PASSWORD=""
 python scripts/download_mvfoul.py --output data/SoccerNet --version 720p
 ```
 
-Extract CV features on a quick bundled sample:
-
-```
-python scripts/extract_cv_features.py \
-  --dataset "VARS interface/dataset" \
-  --splits . \
-  --output outputs/interface_cv \
-  --max-actions 5 \
-  --visualize
-```
-
-The overlay videos keep the visual output minimal: they draw only red lines for
-possible contact and freeze for about one second when a new possible-contact
-event begins. Tune the visual contact sensitivity with
-`--contact-distance-ratio`, `--contact-motion-p95`, and
-`--contact-pause-seconds`.
-
-For the full SoccerNet-MVFoul dataset, use the unzipped dataset root containing
-`Train`, `Valid`, `Test`, and `Chall`:
-
-```
-python scripts/extract_cv_features.py \
-  --dataset data/SoccerNet \
-  --output outputs/cv_features \
-  --splits Train Valid Test Chall \
-  --visualize
-```
-
-See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for visual
-overlay details. After extracting full Train and Valid features, train a
-classical RandomForest foul classifier with:
-
-```
-python scripts/train_classical_cv.py \
-  --features outputs/cv_features \
-  --dataset data/SoccerNet \
-  --target offence_severity \
-  --feature-set core \
-  --output outputs/classical_cv
-```
-
-To fuse the extracted CV descriptors into the VARS video baseline, pass the
-feature folder to the original training entry point:
+Stage-one fine-tuning:
 
 ```
 cd "VARS model"
 python main.py \
   --path ../data/SoccerNet \
-  --cv_features_path ../outputs/cv_features \
-  --cv_feature_set core \
-  --pooling_type attention \
-  --pre_model mvit_v2_s
+  --pre_model tadaformer_l14 \
+  --pooling_type max \
+  --num_views 2 \
+  --sample_frames 16 \
+  --temporal_stride 2 \
+  --input_height 280 \
+  --input_width 490 \
+  --tada_timm_model vit_large_patch14_clip_224.openai \
+  --tada_pretrained
 ```
+
+Render red contact boxes only for model-predicted fouls:
+
+```
+python scripts/visualize_foul_contact_boxes.py \
+  --dataset data/SoccerNet \
+  --predictions "VARS model/predicitions_test.json" \
+  --splits Test \
+  --output outputs/model_gated_contact_boxes
+```
+
+See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for the full
+stage-one, stage-two, evaluation, and contact-box commands.
 
 ## VARS interface
 
