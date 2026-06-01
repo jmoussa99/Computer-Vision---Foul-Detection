@@ -22,6 +22,10 @@ class FeatureConfig:
     contact_motion_p95: float = 8.0
     contact_pause_seconds: float = 1.0
     contact_box_padding: int = 12
+    # How to pick the representative contact frame:
+    #   "contact": strongest motion spike among possible-contact frames (default),
+    #   "closest": closest two-player approach among interaction frames.
+    peak_strategy: str = "contact"
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,53 @@ class InteractionCue:
     second_id: int
     distance_ratio: float
     possible_contact: bool
+
+
+@dataclass
+class FrameState:
+    """Per-frame motion/tracking summary, decoupled from the frame image.
+
+    Caching a list of these (plus the frame images or cached poses) lets the
+    peak-contact selection be replayed for many threshold configs without
+    re-decoding video.
+    """
+
+    frame_index: int
+    height: int
+    width: int
+    tracks: dict[int, MotionDetection]
+    motion_p95: float
+
+
+@dataclass
+class PeakSelection:
+    """Result of choosing the representative contact frame (no image)."""
+
+    frame_index: int
+    contact_point: tuple[float, float] | None
+    contact_box: tuple[int, int, int, int] | None
+    player_boxes: tuple[tuple[int, int, int, int], ...]
+    motion_p95: float
+    distance_ratio: float
+    has_contact: bool
+
+
+@dataclass
+class PeakContact:
+    """Representative contact moment located in a clip.
+
+    Used by the body-part recognizer to know where (and on which frame) to run
+    pose estimation. ``frame`` is the resized BGR frame at ``frame_index``.
+    """
+
+    frame_index: int
+    frame: np.ndarray
+    contact_point: tuple[float, float] | None
+    contact_box: tuple[int, int, int, int] | None
+    player_boxes: tuple[tuple[int, int, int, int], ...]
+    motion_p95: float
+    distance_ratio: float
+    has_contact: bool
 
 
 class CentroidTracker:
@@ -180,6 +231,177 @@ class ClipFeatureExtractor:
             "long_tracks": int(sum(length >= 8 for length in track_lengths)),
             "track_length_mean": _safe_mean(track_lengths),
         }
+
+    def analyze_frames(
+        self, clip_path: str | Path, keep_images: bool = False
+    ) -> tuple[list[FrameState], dict[int, np.ndarray]]:
+        """Decode a clip once and return per-frame motion/tracking states.
+
+        Set ``keep_images`` to also return the resized BGR frames keyed by
+        frame index (needed to run pose estimation on the chosen frame).
+        """
+        clip_path = Path(clip_path)
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open video: {clip_path}")
+
+        bg = cv2.createBackgroundSubtractorMOG2(history=40, varThreshold=24, detectShadows=False)
+        tracker = CentroidTracker()
+        prev_gray: np.ndarray | None = None
+        frame_count = 0
+        sampled = 0
+        states: list[FrameState] = []
+        images: dict[int, np.ndarray] = {}
+
+        while sampled < self.config.max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_count += 1
+            if (frame_count - 1) % self.config.frame_stride != 0:
+                continue
+
+            frame = self._resize(frame)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            detections = self._moving_detections(bg.apply(frame))
+            tracks = tracker.update(detections)
+
+            if prev_gray is not None:
+                flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                p95 = float(np.percentile(mag, 95))
+            else:
+                p95 = 0.0
+            prev_gray = gray
+
+            states.append(
+                FrameState(
+                    frame_index=sampled,
+                    height=frame.shape[0],
+                    width=frame.shape[1],
+                    tracks=dict(tracks),
+                    motion_p95=p95,
+                )
+            )
+            if keep_images:
+                images[sampled] = frame.copy()
+            sampled += 1
+
+        cap.release()
+        return states, images
+
+    def select_peak_state(self, states: list[FrameState]) -> PeakSelection | None:
+        """Pick the representative contact frame from per-frame states.
+
+        Honors ``config.peak_strategy``. Returns ``None`` only for empty input.
+        """
+        best_contact: PeakSelection | None = None
+        best_close: PeakSelection | None = None
+        best_motion: PeakSelection | None = None
+
+        for state in states:
+            shape = (state.height, state.width, 3)
+            if best_motion is None or state.motion_p95 > best_motion.motion_p95:
+                best_motion = PeakSelection(
+                    frame_index=state.frame_index,
+                    contact_point=None,
+                    contact_box=None,
+                    player_boxes=(),
+                    motion_p95=state.motion_p95,
+                    distance_ratio=1.0,
+                    has_contact=False,
+                )
+
+            cues = self._interaction_cues(state.tracks, shape, state.motion_p95)
+            if not cues:
+                continue
+            primary = min(cues, key=lambda cue: cue.distance_ratio)
+            first = state.tracks.get(primary.first_id)
+            second = state.tracks.get(primary.second_id)
+            if first is None or second is None:
+                continue
+            candidate = self._build_peak(shape, state.frame_index, primary, first, second, state.motion_p95)
+            if primary.possible_contact and (best_contact is None or state.motion_p95 > best_contact.motion_p95):
+                best_contact = candidate
+            if best_close is None or primary.distance_ratio < best_close.distance_ratio:
+                best_close = candidate
+
+        if self.config.peak_strategy == "closest":
+            return best_close or best_contact or best_motion
+        return best_contact or best_close or best_motion
+
+    def extract_peak_contact(self, clip_path: str | Path) -> PeakContact | None:
+        """Find the most representative contact moment in a clip.
+
+        Returns the chosen frame (per ``config.peak_strategy``) with its image,
+        contact point/box, and contributing player boxes. Returns ``None`` only
+        if the clip has no frames.
+        """
+        states, images = self.analyze_frames(clip_path, keep_images=True)
+        selection = self.select_peak_state(states)
+        if selection is None:
+            return None
+        frame = images.get(selection.frame_index)
+        if frame is None:
+            return None
+        return PeakContact(
+            frame_index=selection.frame_index,
+            frame=frame,
+            contact_point=selection.contact_point,
+            contact_box=selection.contact_box,
+            player_boxes=selection.player_boxes,
+            motion_p95=selection.motion_p95,
+            distance_ratio=selection.distance_ratio,
+            has_contact=selection.has_contact,
+        )
+
+    def _build_peak(
+        self,
+        shape: tuple[int, ...],
+        frame_index: int,
+        cue: InteractionCue,
+        first: MotionDetection,
+        second: MotionDetection,
+        motion_p95: float,
+    ) -> PeakSelection:
+        box = self._contact_box(first, second, shape)
+        point = (
+            (first.centroid[0] + second.centroid[0]) / 2.0,
+            (first.centroid[1] + second.centroid[1]) / 2.0,
+        )
+        return PeakSelection(
+            frame_index=frame_index,
+            contact_point=point,
+            contact_box=box,
+            player_boxes=(first.bbox, second.bbox),
+            motion_p95=motion_p95,
+            distance_ratio=cue.distance_ratio,
+            has_contact=cue.possible_contact,
+        )
+
+    def read_frames(self, clip_path: str | Path) -> list[tuple[int, np.ndarray]]:
+        """Decode and return sampled, resized BGR frames (no motion analysis).
+
+        Cheaper than analyze_frames; used by the pose-based contact locator.
+        """
+        clip_path = Path(clip_path)
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open video: {clip_path}")
+        frames: list[tuple[int, np.ndarray]] = []
+        frame_count = 0
+        sampled = 0
+        while sampled < self.config.max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_count += 1
+            if (frame_count - 1) % self.config.frame_stride != 0:
+                continue
+            frames.append((sampled, self._resize(frame)))
+            sampled += 1
+        cap.release()
+        return frames
 
     def _resize(self, frame: np.ndarray) -> np.ndarray:
         if frame.shape[1] <= self.config.resize_width:

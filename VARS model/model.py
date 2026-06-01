@@ -68,9 +68,9 @@ class MVNetwork(torch.nn.Module):
         return self.mvnetwork(mvimages, cv_features=cv_features)
 
     def extract_features(self, mvimages, cv_features=None, view_ids=None):
-        if not self.is_tadaformer:
-            raise NotImplementedError("Feature extraction is currently implemented for tadaformer_l14.")
-        return self.mvnetwork.extract_features(mvimages, cv_features=cv_features, view_ids=view_ids)
+        if self.is_tadaformer:
+            return self.mvnetwork.extract_features(mvimages, cv_features=cv_features, view_ids=view_ids)
+        return self.mvnetwork.extract_features(mvimages, cv_features=cv_features)
 
     def freeze_backbone(self):
         if self.is_tadaformer:

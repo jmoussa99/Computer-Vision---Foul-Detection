@@ -63,7 +63,11 @@ class TadaFormerL14MVNetwork(nn.Module):
         return pred_offence_severity, pred_action, view_features
 
     def extract_features(self, mvclips, cv_features=None, view_ids=None):
+        if mvclips.shape[2] != 3 and mvclips.shape[3] == 3:
+            mvclips = mvclips.permute(0, 1, 3, 2, 4, 5)
         batch_size, num_views, channels, frames, height, width = mvclips.shape
+        if channels != 3:
+            raise ValueError(f"Expected RGB video with 3 channels, got tensor shape {tuple(mvclips.shape)}")
         frames_flat = mvclips.permute(0, 1, 3, 2, 4, 5).reshape(batch_size * num_views * frames, channels, height, width)
         if (height, width) != self.input_size:
             frames_flat = F.interpolate(frames_flat, size=self.input_size, mode="bilinear", align_corners=False)

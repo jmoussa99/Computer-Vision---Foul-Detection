@@ -3,6 +3,7 @@ import os
 import time
 import torch
 import gc
+import csv
 from config.classes import INVERSE_EVENT_DICTIONARY
 import json
 try:
@@ -16,6 +17,33 @@ def _require_evaluate():
     if evaluate is None:
         raise ModuleNotFoundError("SoccerNet is required for VARS evaluation. Install it with `pip install SoccerNet`.")
     return evaluate
+
+
+def _append_loss_row(loss_path, epoch, split, loss_action, loss_offence_severity):
+    file_exists = os.path.exists(loss_path)
+    total_loss = loss_action + loss_offence_severity
+    with open(loss_path, "a", newline="") as csvfile:
+        writer = csv.DictWriter(
+            csvfile,
+            fieldnames=["epoch", "split", "loss_action", "loss_offence_severity", "loss_total"],
+        )
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            "epoch": epoch,
+            "split": split,
+            "loss_action": loss_action,
+            "loss_offence_severity": loss_offence_severity,
+            "loss_total": total_loss,
+        })
+    logging.info(
+        "%s epoch %s loss_action=%.6f loss_offence_severity=%.6f loss_total=%.6f",
+        split.upper(),
+        epoch,
+        loss_action,
+        loss_offence_severity,
+        total_loss,
+    )
 
 def trainer(train_loader,
             val_loader2,
@@ -34,6 +62,7 @@ def trainer(train_loader,
 
     logging.info("start training")
     counter = 0
+    loss_path = os.path.join(best_model_path, "losses.csv")
 
     for epoch in range(epoch_start, max_epochs):
         
@@ -54,6 +83,7 @@ def trainer(train_loader,
             set_name="train",
             pbar=pbar,
         )
+        _append_loss_row(loss_path, epoch + 1, "train", loss_action, loss_offence_severity)
 
         results = _require_evaluate()(os.path.join(path_dataset, "Train", "annotations.json"), prediction_file)
         print("TRAINING")
@@ -70,6 +100,7 @@ def trainer(train_loader,
             train = False,
             set_name="valid"
         )
+        _append_loss_row(loss_path, epoch + 1, "valid", loss_action, loss_offence_severity)
 
         results = _require_evaluate()(os.path.join(path_dataset, "Valid", "annotations.json"), prediction_file)
         print("VALIDATION")
@@ -87,6 +118,7 @@ def trainer(train_loader,
                 train=False,
                 set_name="test",
             )
+        _append_loss_row(loss_path, epoch + 1, "test", loss_action, loss_offence_severity)
 
         results = _require_evaluate()(os.path.join(path_dataset, "Test", "annotations.json"), prediction_file)
         print("TEST")
@@ -162,8 +194,8 @@ def train(dataloader,
             outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features, view_ids)
             
             if len(action) == 1:
-                preds_sev = torch.argmax(outputs_offence_severity, 0)
-                preds_act = torch.argmax(outputs_action, 0)
+                preds_sev = torch.argmax(outputs_offence_severity.detach().cpu(), dim=-1)
+                preds_act = torch.argmax(outputs_action.detach().cpu(), dim=-1)
 
                 values = {}
                 values["Action class"] = INVERSE_EVENT_DICTIONARY["action_class"][preds_act.item()]
@@ -262,8 +294,8 @@ def evaluation(dataloader,
             outputs_offence_severity, outputs_action, _ = model(mvclips, cv_features, view_ids)
 
             if len(action) == 1:
-                preds_sev = torch.argmax(outputs_offence_severity, 0)
-                preds_act = torch.argmax(outputs_action, 0)
+                preds_sev = torch.argmax(outputs_offence_severity.detach().cpu(), dim=-1)
+                preds_act = torch.argmax(outputs_action.detach().cpu(), dim=-1)
 
                 values = {}
                 values["Action class"] = INVERSE_EVENT_DICTIONARY["action_class"][preds_act.item()]

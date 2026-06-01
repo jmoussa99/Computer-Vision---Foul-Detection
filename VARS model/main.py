@@ -47,6 +47,10 @@ def load_compatible_state_dict(model, state_dict):
         logging.info("Skipped %d incompatible pretrained weights after enabling CV fusion.", len(skipped))
 
 
+def video_to_float_unit(video):
+    return video.float() / 255.0
+
+
 def checkArguments():
 
     # args.num_views
@@ -182,7 +186,7 @@ def main(*args):
         transforms_model = MViT_V2_S_Weights.KINETICS400_V1.transforms()
     elif pre_model == "tadaformer_l14":
         transforms_model = transforms.Compose([
-            transforms.Lambda(lambda x: x.float() / 255.0),
+            transforms.Lambda(video_to_float_unit),
             transforms.Resize((args.input_height, args.input_width), antialias=True),
             transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
         ])

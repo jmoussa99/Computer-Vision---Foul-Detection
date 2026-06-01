@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
 
 
 CORE_CLIP_FEATURES = (
@@ -67,6 +65,9 @@ def train_random_forest(
     feature_set: str = "core",
     random_state: int = 7,
 ) -> tuple[RandomForestClassifier, dict[str, Any]]:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score, classification_report
+
     _validate_feature_set(feature_set)
     x_train, y_train = load_feature_dataset(feature_root, dataset_root, train_split, target, feature_set)
     x_eval, y_eval = load_feature_dataset(feature_root, dataset_root, eval_split, target, feature_set)

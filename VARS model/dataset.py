@@ -6,13 +6,41 @@ import json
 import sys
 from pathlib import Path
 from data_loader import label2vectormerge, clips2vectormerge
-from torchvision.io.video import read_video
+try:
+    from torchvision.io import read_video
+except (ImportError, AttributeError):
+    try:
+        from torchvision.io.video import read_video
+    except (ImportError, AttributeError):
+        read_video = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from cv_foul_detection.classical_model import feature_dim, vectorize_payload
+
+
+def read_video_frames(path):
+    if read_video is not None:
+        video, _, _ = read_video(path, output_format="THWC")
+        return video
+
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    frames = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(torch.from_numpy(frame))
+    capture.release()
+
+    if not frames:
+        raise RuntimeError(f"Could not read video: {path}")
+    return torch.stack(frames, dim=0)
 
 
 class MultiViewDataset(Dataset):
@@ -121,7 +149,7 @@ class MultiViewDataset(Dataset):
 
             view_ids.append(index_view)
 
-            video, _, _ = read_video(self.clips[index][index_view], output_format="THWC")
+            video = read_video_frames(self.clips[index][index_view])
             if self.sample_frames is None:
                 frames = video[self.start:self.end,:,:,:]
                 final_frames = None

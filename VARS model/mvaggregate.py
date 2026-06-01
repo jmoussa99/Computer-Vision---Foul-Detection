@@ -129,8 +129,7 @@ class MVAggregate(nn.Module):
         else:
             self.aggregation_model = WeightedAggregate(model=model, feat_dim=feat_dim, lifting_net=lifting_net)
 
-    def forward(self, mvimages, cv_features=None):
-
+    def _shared_features(self, mvimages, cv_features=None):
         pooled_view, attention = self.aggregation_model(mvimages)
         if len(pooled_view.shape) == 1:
             pooled_view = pooled_view.unsqueeze(0)
@@ -144,7 +143,19 @@ class MVAggregate(nn.Module):
             pooled_view = torch.cat((pooled_view, self.cv_encoder(cv_features)), dim=1)
 
         inter = self.inter(pooled_view)
+        return inter, attention
+
+    def forward(self, mvimages, cv_features=None):
+        inter, attention = self._shared_features(mvimages, cv_features=cv_features)
         pred_action = self.fc_action(inter)
         pred_offence_severity = self.fc_offence(inter)
-
         return pred_offence_severity, pred_action, attention
+
+    def extract_features(self, mvimages, cv_features=None):
+        """Return the shared 400-d representation feeding the task heads.
+
+        This is the frozen deep net's "context" for downstream recognizers
+        (e.g. the body-part head trained in scripts/train_bodypart_head.py).
+        """
+        inter, _ = self._shared_features(mvimages, cv_features=cv_features)
+        return inter
