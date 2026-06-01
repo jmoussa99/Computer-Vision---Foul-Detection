@@ -5,16 +5,22 @@ The expensive work (video decode, optical flow, tracking, pose) is cached once
 per action. Threshold configs are then swept cheaply in memory via coordinate
 ascent to maximize coarse Upper/Under-body accuracy.
 
-Two phases (the cache is reused automatically when present):
-  1. Build cache: analyze each foul clip's frames + run pose on multi-player
-     frames, store per-frame tracks/motion/poses.
-  2. Sweep: replay peak-contact selection + body-part assignment for many
-     configs using the cached data, score vs ground-truth Bodypart.
+Two modes:
+  - ``motion`` : tunes the legacy MOG2/optical-flow contact box.
+  - ``pose``   : tunes the pose-based two-player contact box (the recognizer
+                 default). Optimizes accuracy on the videos that show a clear
+                 two-player contact, subject to a coverage floor.
+
+Two phases per mode (the cache is reused automatically when present):
+  1. Build cache: pose the relevant frames once and store them.
+  2. Sweep: replay contact selection + body-part assignment for many configs
+     using the cached data, score vs ground-truth Bodypart.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -25,14 +31,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from cv_foul_detection.bodypart import assign_bodypart
+from cv_foul_detection.contact import _center_window, _closest_pair, _pair_height, _subsample
 from cv_foul_detection.dataset import iter_actions
 from cv_foul_detection.features import ClipFeatureExtractor, FeatureConfig, FrameState, MotionDetection
 from cv_foul_detection.io import write_json
 from cv_foul_detection.pose import PlayerPose, PoseEstimator
 
-import json
 
-
+# --- motion mode ------------------------------------------------------------
 CANDIDATES = {
     "field_top_ratio": [0.0, 0.1, 0.18, 0.25, 0.35],
     "contact_distance_ratio": [0.05, 0.08, 0.12, 0.18, 0.25],
@@ -51,16 +57,34 @@ BASELINE = {
 }
 STRATEGIES = ["contact", "closest"]
 
+# --- pose mode --------------------------------------------------------------
+CANDIDATES_POSE = {
+    "person_score": [0.4, 0.5, 0.7, 0.85],
+    "kp_score": [1.0, 2.0, 3.0, 4.0],
+    "center_frac": [0.3, 0.4, 0.6, 0.8, 1.0],
+    "max_distance_ratio": [0.0, 0.15, 0.2, 0.25, 0.35, 0.5],
+    "max_pose_frames": [16, 24, 32],
+}
+BASELINE_POSE = {
+    "person_score": 0.85,
+    "kp_score": 2.0,
+    "center_frac": 0.6,
+    "max_distance_ratio": 0.25,
+    "max_pose_frames": 24,
+}
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", default="pose", choices=["pose", "motion"])
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--splits", nargs="+", default=["Valid"])
-    parser.add_argument("--cache", default="outputs/tune/bodypart_cache.pt")
-    parser.add_argument("--output", default="outputs/tune/bodypart_tune_report.json")
+    parser.add_argument("--cache", default=None, help="Cache path (defaults per mode).")
+    parser.add_argument("--output", default=None, help="Report path (defaults per mode).")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild the cache even if it exists.")
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-actions", type=int, default=None, help="Limit cached actions (quick tests).")
+    parser.add_argument("--min-coverage", type=float, default=0.4, help="pose: min kept fraction when optimizing.")
     # Structural params fixed at cache build time.
     parser.add_argument("--max-frames", type=int, default=126)
     parser.add_argument("--frame-stride", type=int, default=3)
@@ -73,8 +97,199 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    cache_path = Path(args.cache)
+    if args.cache is None:
+        args.cache = f"outputs/tune/bodypart_cache_{args.mode}.pt"
+    if args.output is None:
+        args.output = f"outputs/tune/bodypart_tune_report_{args.mode}.json"
+    if args.mode == "pose":
+        return run_pose(args)
+    return run_motion(args)
 
+
+# ===========================================================================
+# Pose mode
+# ===========================================================================
+def run_pose(args) -> int:
+    cache_path = Path(args.cache)
+    if args.rebuild or not cache_path.exists():
+        build_cache_pose(args, cache_path)
+
+    cache = torch.load(cache_path, map_location="cpu", weights_only=False)
+    data = _load_in_memory_pose(cache)
+    meta = cache["meta"]
+    print(f"Loaded {len(data)} cached foul actions (truths: {_truth_counts(data)}).")
+    print(f"Structural build params: {meta}")
+
+    base = _evaluate_pose(BASELINE_POSE, data)
+    print(f"Baseline (pose defaults): acc={base[0]:.4f} coverage={base[1]:.4f} kept_acc={base[2]:.4f}")
+
+    config = dict(BASELINE_POSE)
+    acc, cov, asg = base
+    for _ in range(args.rounds):
+        for param, values in CANDIDATES_POSE.items():
+            best_value = config[param]
+            best_score = _score_pose(acc, cov, asg, args.min_coverage)
+            best_metrics = (acc, cov, asg)
+            for value in values:
+                trial = dict(config)
+                trial[param] = value
+                t_acc, t_cov, t_asg = _evaluate_pose(trial, data)
+                score = _score_pose(t_acc, t_cov, t_asg, args.min_coverage)
+                if score > best_score:
+                    best_value, best_score, best_metrics = value, score, (t_acc, t_cov, t_asg)
+            config[param] = best_value
+            acc, cov, asg = best_metrics
+
+    best = {"accuracy": acc, "coverage": cov, "kept_accuracy": asg, **config}
+    report = {
+        "mode": "pose",
+        "samples": len(data),
+        "truth_counts": _truth_counts(data),
+        "build_meta": meta,
+        "min_coverage": args.min_coverage,
+        "baseline": {"accuracy": base[0], "coverage": base[1], "kept_accuracy": base[2], **BASELINE_POSE},
+        "best": best,
+        "recommended_flags": _recommended_flags_pose(best, meta),
+    }
+    write_json(args.output, report)
+    print("\n=== BEST POSE CONFIG ===")
+    print(json.dumps(best, indent=2))
+    print(f"\nReport: {args.output}")
+    print("Recommended recognizer flags:\n  " + " ".join(report["recommended_flags"]))
+    return 0
+
+
+def build_cache_pose(args, cache_path: Path) -> None:
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    extractor = ClipFeatureExtractor(
+        FeatureConfig(
+            max_frames=args.max_frames,
+            frame_stride=args.frame_stride,
+            resize_width=args.resize_width,
+        )
+    )
+    pose = PoseEstimator(device=device, person_score_threshold=args.cache_person_score)
+    annotations = _load_annotations(args.dataset, args.splits)
+
+    actions_cache = {}
+    processed = 0
+    for action in iter_actions(args.dataset, args.splits):
+        if args.max_actions is not None and processed >= args.max_actions:
+            break
+        truth = annotations.get(action.split, {}).get(str(action.action_id), {}).get("Bodypart", "").strip()
+        if truth not in ("Upper body", "Under body"):
+            continue
+        live_clip = action.clips[0]
+        try:
+            frames = extractor.read_frames(live_clip)
+            poses = {}
+            for frame_index, frame in frames:
+                detected = pose.estimate(frame)
+                poses[frame_index] = [
+                    {"box": p.box, "score": p.score, "keypoints": p.keypoints} for p in detected
+                ]
+        except Exception as exc:  # noqa: BLE001 - skip unreadable/corrupt clips
+            print(f"  skip {action.split}/{action.action_id}: {exc}")
+            continue
+        actions_cache[f"{action.split}/{action.action_id}"] = {"truth": truth, "poses": poses}
+        processed += 1
+        if processed % 25 == 0:
+            print(f"  cached {processed} foul actions...")
+
+    cache = {
+        "meta": {
+            "mode": "pose",
+            "max_frames": args.max_frames,
+            "frame_stride": args.frame_stride,
+            "resize_width": args.resize_width,
+        },
+        "actions": actions_cache,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(cache, cache_path)
+    print(f"Built pose cache with {len(actions_cache)} actions -> {cache_path}")
+
+
+def _load_in_memory_pose(cache: dict) -> list[dict]:
+    data = []
+    for record in cache["actions"].values():
+        items = []
+        for fi, players in record["poses"].items():
+            posed = [
+                PlayerPose(
+                    box=tuple(p["box"]),
+                    score=float(p["score"]),
+                    keypoints=np.asarray(p["keypoints"], dtype=np.float32),
+                )
+                for p in players
+            ]
+            items.append((int(fi), posed))
+        items.sort(key=lambda x: x[0])
+        data.append({"truth": record["truth"], "pose_items": items})
+    return data
+
+
+def _evaluate_pose(config: dict, data: list[dict]) -> tuple[float, float, float]:
+    person_score = config["person_score"]
+    kp_score = config["kp_score"]
+    total = len(data)
+    correct = 0
+    assigned = 0
+    for record in data:
+        window = _center_window(record["pose_items"], config["center_frac"])
+        window = _subsample(window, int(config["max_pose_frames"]))
+        best = None
+        for _fi, players in window:
+            ps = [p for p in players if p.score >= person_score]
+            pair = _closest_pair(ps, kp_score)
+            if pair is None:
+                continue
+            distance, point, (i, j) = pair
+            if best is None or distance < best[0]:
+                best = (distance, point, ps, (i, j))
+        if best is None:
+            continue
+        distance, point, ps, (i, j) = best
+        if config["max_distance_ratio"] > 0.0 and distance > config["max_distance_ratio"] * _pair_height(ps[i], ps[j]):
+            continue
+        result = assign_bodypart(point, ps, keypoint_score_threshold=kp_score)
+        if result is None:
+            continue
+        assigned += 1
+        if result.coarse == record["truth"]:
+            correct += 1
+    accuracy = correct / total if total else 0.0
+    coverage = assigned / total if total else 0.0
+    kept_acc = correct / assigned if assigned else 0.0
+    return accuracy, coverage, kept_acc
+
+
+def _score_pose(acc: float, cov: float, kept: float, min_cov: float) -> tuple[float, float]:
+    # Optimize accuracy on the kept two-player videos, but require enough coverage.
+    if cov < min_cov:
+        return (-1.0, cov)
+    return (kept, cov)
+
+
+def _recommended_flags_pose(best: dict, meta: dict) -> list[str]:
+    return [
+        "--contact-source pose",
+        "--require-two-players",
+        f"--person-score-threshold {best['person_score']}",
+        f"--keypoint-score-threshold {best['kp_score']}",
+        f"--contact-center-frac {best['center_frac']}",
+        f"--max-contact-distance-ratio {best['max_distance_ratio']}",
+        f"--max-pose-frames {int(best['max_pose_frames'])}",
+        f"--max-frames {meta['max_frames']}",
+        f"--frame-stride {meta['frame_stride']}",
+    ]
+
+
+# ===========================================================================
+# Motion mode (legacy)
+# ===========================================================================
+def run_motion(args) -> int:
+    cache_path = Path(args.cache)
     if args.rebuild or not cache_path.exists():
         build_cache(args, cache_path)
 
@@ -112,6 +327,7 @@ def main() -> int:
             best = {"accuracy": acc, "coverage": cov, "assigned_accuracy": asg, "strategy": strategy, **config}
 
     report = {
+        "mode": "motion",
         "samples": len(data),
         "truth_counts": _truth_counts(data),
         "build_meta": meta,
@@ -173,6 +389,7 @@ def build_cache(args, cache_path: Path) -> None:
 
     cache = {
         "meta": {
+            "mode": "motion",
             "max_frames": args.max_frames,
             "frame_stride": args.frame_stride,
             "resize_width": args.resize_width,

@@ -1,0 +1,123 @@
+"""Spatial saliency from the deep foul detector ("where the net looks").
+
+For an action the deep net flags as a foul, this occludes a grid of spatial
+regions in the live view and measures how much each occlusion lowers the net's
+"foulness" score. The region whose removal hurts the foul score most is where
+the model is looking -- the foul location. The saliency is computed in the
+model's cropped input space and mapped back to the original broadcast frame.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class CropGeometry:
+    """Maps the model's square crop back to original-frame pixel coordinates."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+    def uv_to_point(self, u: float, v: float) -> tuple[float, float]:
+        return (self.x1 + u * (self.x2 - self.x1), self.y1 + v * (self.y2 - self.y1))
+
+    def as_box(self) -> tuple[int, int, int, int]:
+        return (int(self.x1), int(self.y1), int(self.x2), int(self.y2))
+
+
+def crop_geometry(
+    pre_model: str,
+    orig_h: int,
+    orig_w: int,
+    resize_shorter: int = 256,
+    crop_size: int = 224,
+) -> CropGeometry:
+    """Rectangle in original-frame coords that the model's input crop covers.
+
+    Torchvision video backbones (e.g. mvit_v2_s) resize the shorter side to
+    ``resize_shorter`` then center-crop ``crop_size``. TAdaFormer resizes the
+    whole frame (no crop), so the rectangle is the full frame.
+    """
+    if pre_model == "tadaformer_l14":
+        return CropGeometry(0.0, 0.0, float(orig_w), float(orig_h))
+
+    scale = resize_shorter / float(min(orig_h, orig_w))
+    resized_w = orig_w * scale
+    resized_h = orig_h * scale
+    crop_x0 = (resized_w - crop_size) / 2.0
+    crop_y0 = (resized_h - crop_size) / 2.0
+    return CropGeometry(
+        x1=crop_x0 / scale,
+        y1=crop_y0 / scale,
+        x2=(crop_x0 + crop_size) / scale,
+        y2=(crop_y0 + crop_size) / scale,
+    )
+
+
+def compute_occlusion_saliency(
+    model,
+    mvclips,
+    view_ids,
+    view: int = 0,
+    grid: int = 6,
+    occ_value: float = 0.0,
+    chunk: int = 12,
+) -> np.ndarray:
+    """Return a ``grid x grid`` foul-score drop map for the chosen view.
+
+    ``mvclips`` is the batched model input (batch size 1). Higher values mark
+    regions whose occlusion lowers the net's foulness most.
+    """
+    import torch
+
+    device = mvclips.device
+    height, width = mvclips.shape[-2], mvclips.shape[-1]
+    cell_h = height / grid
+    cell_w = width / grid
+
+    with torch.no_grad():
+        base = _foul_score(model, mvclips, view_ids)
+
+    cells = [(gy, gx) for gy in range(grid) for gx in range(grid)]
+    drops = np.zeros(len(cells), dtype=np.float32)
+    view_ids_chunk_cache: dict[int, "torch.Tensor"] = {}
+
+    for start in range(0, len(cells), chunk):
+        batch_cells = cells[start : start + chunk]
+        n = len(batch_cells)
+        masked = mvclips.repeat(n, *([1] * (mvclips.dim() - 1))).clone()
+        for k, (gy, gx) in enumerate(batch_cells):
+            y0, y1 = int(round(gy * cell_h)), int(round((gy + 1) * cell_h))
+            x0, x1 = int(round(gx * cell_w)), int(round((gx + 1) * cell_w))
+            masked[k, view, ..., y0:y1, x0:x1] = occ_value
+        if n not in view_ids_chunk_cache:
+            view_ids_chunk_cache[n] = view_ids.repeat(n, *([1] * (view_ids.dim() - 1)))
+        with torch.no_grad():
+            scores = _foul_score(model, masked, view_ids_chunk_cache[n], reduce=False)
+        drops[start : start + n] = (base - scores).detach().cpu().numpy()
+
+    return drops.reshape(grid, grid)
+
+
+def _foul_score(model, mvclips, view_ids, reduce: bool = True):
+    import torch
+
+    offence_logits, _, _ = model(mvclips, None, view_ids)
+    probs = torch.softmax(offence_logits, dim=-1)
+    foulness = 1.0 - probs[:, 0]
+    if reduce:
+        return float(foulness[0].item())
+    return foulness
+
+
+def peak_uv(saliency: np.ndarray) -> tuple[float, float]:
+    """Center (u, v) in [0, 1] of the strongest saliency cell."""
+    grid_h, grid_w = saliency.shape
+    flat = int(np.argmax(saliency))
+    gy, gx = divmod(flat, grid_w)
+    return ((gx + 0.5) / grid_w, (gy + 0.5) / grid_h)

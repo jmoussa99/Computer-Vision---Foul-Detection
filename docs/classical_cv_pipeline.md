@@ -161,6 +161,15 @@ The red box marks **where contact occurs**. Two strategies are available:
 - `motion`: the legacy MOG2/optical-flow detector picks the peak-motion contact
   frame and the union box of the interacting blobs. Used as an automatic
   fallback when no two players can be posed.
+- `deep`: uses the deep net itself. It occludes a grid of regions in the live
+  view and measures how much each one lowers the net's "foulness" score; the
+  region whose removal hurts most is where the model is looking. That saliency
+  peak is mapped from the model's crop back to the frame and snapped to the
+  nearest player, and the heatmap is overlaid. Requires `--weights` (the
+  saliency is computed during inline detection). Flags: `--saliency-grid`,
+  `--saliency-resize-shorter`, `--saliency-alpha`. Unlike the motion path it can
+  localize even when one player is on the ground / poorly posed, because it
+  reflects the model's own evidence rather than skeleton proximity.
 
 Pose-source flags:
 
@@ -170,6 +179,16 @@ Pose-source flags:
   approach (caps GPU cost).
 - `--contact-center-frac` (default `0.6`): restricts the search to the central
   time window of the clip, where the foul occurs.
+
+Keep only genuine two-player contacts:
+
+- `--require-two-players`: skip the action entirely (no motion fallback) when no
+  frame poses two players in contact. Skipped actions are reported and excluded
+  from the index/outputs.
+- `--max-contact-distance-ratio` (default `0` = off): with the flag above,
+  reject contacts where the two closest keypoints are farther apart than this
+  fraction of the players' height. `0.25` means the two people must nearly
+  touch; larger values are more permissive.
 
 ### Run with precomputed deep predictions
 
@@ -268,33 +287,49 @@ The recognizer defaults are the values found by `scripts/tune_bodypart.py`.
 
 `scripts/tune_bodypart.py` tunes the contact/pose thresholds against the
 dataset's ground-truth `Bodypart` label. It caches the expensive per-frame
-analysis (optical flow, tracking, pose) once, then sweeps configs with
-coordinate ascent in seconds.
+analysis (pose, and for motion mode optical flow + tracking) once, then sweeps
+configs with coordinate ascent in seconds. Two modes:
+
+Pose mode (default, tunes the two-player contact box):
 
 ```bash
 python scripts/tune_bodypart.py \
+  --mode pose \
   --dataset data/SoccerNet \
   --splits Valid \
-  --device cuda
+  --device cuda \
+  --min-coverage 0.4
 ```
 
-It prints the baseline accuracy, the best config per strategy, and the
-recommended recognizer flags, and writes a report to
-`outputs/tune/bodypart_tune_report.json`. Re-run with `--rebuild` to refresh the
-cache after changing the structural params (`--max-frames`, `--frame-stride`,
-`--min-track-area`).
+It sweeps `--person-score-threshold`, `--keypoint-score-threshold`,
+`--contact-center-frac`, `--max-contact-distance-ratio`, and `--max-pose-frames`,
+optimizing accuracy on the kept two-player videos subject to a coverage floor
+(`--min-coverage`). It writes `outputs/tune/bodypart_tune_report_pose.json` and
+prints the recommended recognizer flags. The cache (built once, ~25 min on the
+full Valid split because pose runs on every sampled frame) is reused unless you
+pass `--rebuild`.
+
+Motion mode (legacy MOG2 box):
+
+```bash
+python scripts/tune_bodypart.py --mode motion --dataset data/SoccerNet --splits Valid --device cuda
+```
 
 Tuning result on the full Valid split (406 foul actions, 147 Upper / 259 Under):
 
-- Default thresholds: 0.443 coarse Upper/Under accuracy.
-- Tuned (`contact` strategy): 0.532 (the values now used as defaults).
+- Pose default thresholds: 0.473 kept accuracy, 0.860 coverage.
+- Pose tuned: 0.483 kept accuracy, 0.948 coverage (the values now used as
+  defaults: `person_score=0.4`, `kp_score=2.0`, `center_frac=0.6`,
+  `max_distance_ratio=0.35`, `max_pose_frames=32`).
+- Legacy motion (`contact` strategy): 0.532.
 
 Caveat: the dataset is 63.8 percent `Under body`, so a majority-class guess
-scores ~0.638. The classical motion+pose localizer (0.532) sits below that
-majority baseline: it adds spatial/explanatory value (it shows where on the
-body contact is detected) but is a weak body-part classifier on its own. The
-deep body-part head below is the recommended classifier; the CV pose overlay
-remains the fine-grained visual localizer.
+scores ~0.638. Both CV localizers (pose 0.483, legacy motion 0.532) sit below
+that majority baseline: they add spatial/explanatory value (they show *where*
+on the body and on which players contact occurs) but are weak body-part
+*classifiers* on their own. The deep body-part head below is the recommended
+classifier; the pose contact box remains the fine-grained visual localizer
+(the red box on the point of contact).
 
 ## Deep Body-Part Head (recommended classifier)
 
