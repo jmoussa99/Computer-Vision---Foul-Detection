@@ -85,15 +85,13 @@ This fork flips the earlier CV-first design. The foul decision now comes from a
 VARS-style deep multi-view video model, and the red contact boxes are a visual
 review layer for actions predicted as fouls.
 
-The `tadaformer_l14` path implements the requested TAdaFormer-L/14-style setup:
+The cleaned project uses the original VARS video backbones:
 
-* 16 frames per view.
-* Temporal stride of 2, giving a 32-frame context window.
-* Input size `280x490`.
-* Random two-view sampling for training.
-* All available views for validation/test.
-* Learnable live/replay view embeddings before max pooling.
-* Max pooling before the offence/severity and action heads.
+* `mvit_v2_s`
+* `r2plus1d_18`
+* `r3d_18`
+* `mc3_18`
+* `s3d`
 
 Install the added dependencies from the repository root:
 
@@ -114,15 +112,11 @@ Stage-one fine-tuning:
 cd "VARS model"
 python main.py \
   --path ../data/SoccerNet \
-  --pre_model tadaformer_l14 \
-  --pooling_type max \
-  --num_views 2 \
-  --sample_frames 16 \
-  --temporal_stride 2 \
-  --input_height 280 \
-  --input_width 490 \
-  --tada_timm_model vit_large_patch14_clip_224.openai \
-  --tada_pretrained
+  --pre_model mvit_v2_s \
+  --pooling_type attention \
+  --start_frame 65 \
+  --end_frame 85 \
+  --fps 21
 ```
 
 Render red contact boxes only for model-predicted fouls:
@@ -136,7 +130,7 @@ python scripts/visualize_foul_contact_boxes.py \
 ```
 
 See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for the full
-stage-one, stage-two, evaluation, and contact-box commands.
+baseline, evaluation, contact-box, and body-part contact commands.
 
 ## VARS interface
 

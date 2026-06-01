@@ -16,7 +16,7 @@ from cv_foul_detection.io import write_json
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Gate red contact-box overlays with VARS/TAdaFormer foul predictions.")
+    parser = argparse.ArgumentParser(description="Gate red contact-box overlays with VARS foul predictions.")
     parser.add_argument("--dataset", required=True, help="Root folder containing Train/Valid/Test/Chall or action_* folders.")
     parser.add_argument("--predictions", required=True, help="Prediction JSON produced by VARS model evaluation.")
     parser.add_argument("--output", default="outputs/model_gated_contact_boxes")

@@ -1,7 +1,6 @@
 import os
 import logging
 import time
-import numpy as np
 import sys
 from pathlib import Path
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
@@ -15,11 +14,9 @@ from train import trainer, evaluation
 import torch.nn as nn
 import torchvision.transforms as transforms
 from model import MVNetwork
-from config.classes import EVENT_DICTIONARY, INVERSE_EVENT_DICTIONARY
 from torchvision.models.video import R3D_18_Weights, MC3_18_Weights
 from torchvision.models.video import R2Plus1D_18_Weights, S3D_Weights
-from torchvision.models.video import MViT_V2_S_Weights, MViT_V1_B_Weights
-from torchvision.models.video import mvit_v2_s, MViT_V2_S_Weights, mvit_v1_b, MViT_V1_B_Weights
+from torchvision.models.video import MViT_V2_S_Weights
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -45,10 +42,6 @@ def load_compatible_state_dict(model, state_dict):
     skipped = sorted(set(state_dict) - set(compatible))
     if skipped:
         logging.info("Skipped %d incompatible pretrained weights after enabling CV fusion.", len(skipped))
-
-
-def video_to_float_unit(video):
-    return video.float() / 255.0
 
 
 def checkArguments():
@@ -95,10 +88,6 @@ def checkArguments():
         print("Possible number for the fps are between 1 and 25")
         exit()
 
-    if args.pre_model == "tadaformer_l14" and args.pooling_type != "max":
-        print("TAdaFormer-L/14 uses max pooling for multi-view aggregation; overriding --pooling_type to max.")
-        args.pooling_type = "max"
-
     if args.cv_feature_set not in FEATURE_SETS:
         print("Could not find your desired argument for --args.cv_feature_set:")
         print("Possible arguments are: " + ", ".join(FEATURE_SETS.keys()))
@@ -133,8 +122,6 @@ def main(*args):
         path_to_model_weights = args.path_to_model_weights
         cv_features_path = args.cv_features_path
         cv_feature_set = args.cv_feature_set
-        sample_frames = args.sample_frames if pre_model == "tadaformer_l14" else None
-        temporal_stride = args.temporal_stride
     else:
         print("EXIT")
         exit()
@@ -184,37 +171,31 @@ def main(*args):
         transforms_model = R2Plus1D_18_Weights.KINETICS400_V1.transforms()
     elif pre_model == "mvit_v2_s":
         transforms_model = MViT_V2_S_Weights.KINETICS400_V1.transforms()
-    elif pre_model == "tadaformer_l14":
-        transforms_model = transforms.Compose([
-            transforms.Lambda(video_to_float_unit),
-            transforms.Resize((args.input_height, args.input_width), antialias=True),
-            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
-        ])
     else:
         transforms_model = R2Plus1D_18_Weights.KINETICS400_V1.transforms()
         print("Warning: Could not find the desired pretrained model")
-        print("Possible options are: r3d_18, s3d, mc3_18, mvit_v2_s, tadaformer_l14 and r2plus1d_18")
+        print("Possible options are: r3d_18, s3d, mc3_18, mvit_v2_s and r2plus1d_18")
         print("We continue with r2plus1d_18")
-    
+
     if only_evaluation == 0:
         dataset_Test2 = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Test', num_views = 5, 
-        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
         
         test_loader2 = torch.utils.data.DataLoader(dataset_Test2,
             batch_size=1, shuffle=False,
             num_workers=max_num_worker, pin_memory=True)
     elif only_evaluation == 1:
         dataset_Chall = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Chall', num_views = 5, 
-        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
 
         chall_loader2 = torch.utils.data.DataLoader(dataset_Chall,
             batch_size=1, shuffle=False,
             num_workers=max_num_worker, pin_memory=True)
     elif only_evaluation == 2:
         dataset_Test2 = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Test', num_views = 5, 
-        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
         dataset_Chall = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Chall', num_views = 5, 
-        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+        transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
 
         test_loader2 = torch.utils.data.DataLoader(dataset_Test2,
             batch_size=1, shuffle=False,
@@ -226,11 +207,11 @@ def main(*args):
     else:
         # Create Train Validation and Test datasets
         dataset_Train = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Train',
-            num_views = num_views, transform=transformAug, transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+            num_views = num_views, transform=transformAug, transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
         dataset_Valid2 = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Valid', num_views = 5, 
-            transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+            transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
         dataset_Test2 = MultiViewDataset(path=path, start=start_frame, end=end_frame, fps=fps, split='Test', num_views = 5, 
-            transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set, sample_frames=sample_frames, temporal_stride=temporal_stride)
+            transform_model=transforms_model, cv_features_path=cv_features_path, cv_feature_set=cv_feature_set)
 
         # Create the dataloaders for train validation and test datasets
         train_loader = torch.utils.data.DataLoader(dataset_Train,
@@ -253,12 +234,7 @@ def main(*args):
         net_name=pre_model,
         agr_type=pooling_type,
         cv_feat_dim=cv_feat_dim,
-        tada_pretrained=args.tada_pretrained,
-        tada_input_size=(args.input_height, args.input_width),
-        tada_timm_model=args.tada_timm_model,
     ).cuda()
-    if args.freeze_backbone:
-        model.freeze_backbone()
 
     if path_to_model_weights != "":
         path_model = os.path.join(path_to_model_weights)
@@ -375,13 +351,6 @@ if __name__ == '__main__':
     parser.add_argument("--path_to_model_weights", required=False, type=str, default="", help="Path to the model weights")
     parser.add_argument("--cv_features_path", required=False, type=str, default="", help="Path to extracted CV features from scripts/extract_cv_features.py. Enables late fusion when set.")
     parser.add_argument("--cv_feature_set", required=False, type=str, default="core", help="CV feature set for fusion. The visual tracking/contact pipeline currently provides: core")
-    parser.add_argument("--sample_frames", required=False, type=int, default=16, help="Number of frames sampled per view for tadaformer_l14.")
-    parser.add_argument("--temporal_stride", required=False, type=int, default=2, help="Frame stride for tadaformer_l14 sampling.")
-    parser.add_argument("--input_height", required=False, type=int, default=280, help="Input height for tadaformer_l14.")
-    parser.add_argument("--input_width", required=False, type=int, default=490, help="Input width for tadaformer_l14.")
-    parser.add_argument("--tada_timm_model", required=False, type=str, default="vit_large_patch14_clip_224.openai", help="timm ViT-L/14 model name used by the TAdaFormer adapter.")
-    parser.add_argument("--tada_pretrained", required=False, action="store_true", help="Initialize the timm ViT-L/14 frame encoder with pretrained weights.")
-    parser.add_argument("--freeze_backbone", required=False, action="store_true", help="Freeze backbone and train only fusion/classification heads.")
 
     args = parser.parse_args()
 

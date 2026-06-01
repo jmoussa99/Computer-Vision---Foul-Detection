@@ -111,16 +111,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keypoint-score-threshold", type=float, default=2.0)
 
     # Deep-net inline config (only used with --weights).
-    parser.add_argument("--pre-model", default="tadaformer_l14")
-    parser.add_argument("--pooling-type", default="max")
-    parser.add_argument("--start-frame", type=int, default=0)
-    parser.add_argument("--end-frame", type=int, default=125)
-    parser.add_argument("--fps", type=int, default=25)
-    parser.add_argument("--sample-frames", type=int, default=16)
-    parser.add_argument("--temporal-stride", type=int, default=2)
-    parser.add_argument("--input-height", type=int, default=280)
-    parser.add_argument("--input-width", type=int, default=490)
-    parser.add_argument("--tada-timm-model", default="vit_large_patch14_clip_224.openai")
+    parser.add_argument("--pre-model", default="mvit_v2_s")
+    parser.add_argument("--pooling-type", default="attention")
+    parser.add_argument("--start-frame", type=int, default=65)
+    parser.add_argument("--end-frame", type=int, default=85)
+    parser.add_argument("--fps", type=int, default=21)
     return parser
 
 
@@ -519,9 +514,6 @@ def _predict_with_weights(args, device: str) -> dict:
     model = MVNetwork(
         net_name=args.pre_model,
         agr_type=args.pooling_type,
-        tada_pretrained=False,
-        tada_input_size=(args.input_height, args.input_width),
-        tada_timm_model=args.tada_timm_model,
     ).to(torch_device)
     checkpoint = torch.load(args.weights, map_location=torch_device)
     state = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -532,7 +524,7 @@ def _predict_with_weights(args, device: str) -> dict:
     bodypart_head = _load_bodypart_head(args.bodypart_head, torch_device) if args.bodypart_head else None
     index_to_bodypart = {0: "Upper body", 1: "Under body"}
 
-    transform_model, sample_frames = _backbone_transform(args)
+    transform_model = _backbone_transform(args)
     model.eval()
 
     predictions: dict[str, dict] = {}
@@ -547,18 +539,15 @@ def _predict_with_weights(args, device: str) -> dict:
             num_views=5,
             transform=None,
             transform_model=transform_model,
-            sample_frames=sample_frames,
-            temporal_stride=args.temporal_stride,
         )
         loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
         with torch.no_grad():
             for batch in loader:
                 if args.detect_limit is not None and len(predictions) >= args.detect_limit:
                     break
-                mvclips, view_ids, action_id = batch[2], batch[-2], batch[-1]
+                mvclips, action_id = batch[2], batch[-1]
                 mvclips = mvclips.to(torch_device).float()
-                view_ids = view_ids.to(torch_device)
-                offence_logits, action_logits, _ = model(mvclips, None, view_ids)
+                offence_logits, action_logits, _ = model(mvclips, None)
                 sev = int(torch.argmax(offence_logits.detach().cpu(), dim=-1).item())
                 act = int(torch.argmax(action_logits.detach().cpu(), dim=-1).item())
                 offence, severity = severity_map[sev]
@@ -568,12 +557,12 @@ def _predict_with_weights(args, device: str) -> dict:
                     "Severity": severity,
                 }
                 if bodypart_head is not None:
-                    out = model.extract_features(mvclips, view_ids=view_ids)
+                    out = model.extract_features(mvclips)
                     features = out[0] if isinstance(out, tuple) else out
                     bp = int(torch.argmax(bodypart_head(features).detach().cpu(), dim=-1).item())
                     entry["BodypartDeep"] = index_to_bodypart[bp]
                 if args.contact_source == "deep" and offence != "No offence":
-                    salmap = compute_occlusion_saliency(model, mvclips, view_ids, view=0, grid=args.saliency_grid)
+                    salmap = compute_occlusion_saliency(model, mvclips, view=0, grid=args.saliency_grid)
                     entry["Saliency"] = salmap.tolist()
                     entry["SaliencyCrop"] = int(mvclips.shape[-1])
                 predictions[str(action_id[0])] = entry
@@ -594,22 +583,11 @@ def _load_bodypart_head(path: str, device):
 
 
 def _backbone_transform(args):
-    """Return (transform_model, sample_frames) matching the chosen backbone.
+    """Return the preprocessing transform matching the chosen VARS backbone.
 
     Mirrors the preprocessing in ``VARS model/main.py`` so a checkpoint runs
-    with the same transforms it was trained on. TAdaFormer uses CLIP
-    normalization with explicit frame sampling; the torchvision video backbones
-    use their Kinetics-400 weight transforms with fps subsampling.
+    with the same transforms it was trained on.
     """
-    import torchvision.transforms as transforms
-
-    if args.pre_model == "tadaformer_l14":
-        transform_model = transforms.Compose([
-            transforms.Lambda(lambda x: x.float() / 255.0),
-            transforms.Resize((args.input_height, args.input_width), antialias=True),
-            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
-        ])
-        return transform_model, args.sample_frames
 
     from torchvision.models.video import (
         MC3_18_Weights,
@@ -626,7 +604,7 @@ def _backbone_transform(args):
         "r2plus1d_18": R2Plus1D_18_Weights,
         "mvit_v2_s": MViT_V2_S_Weights,
     }.get(args.pre_model, R2Plus1D_18_Weights)
-    return weights.KINETICS400_V1.transforms(), None
+    return weights.KINETICS400_V1.transforms()
 
 
 def _load_all_annotations(dataset_root: str, splits: list[str]) -> dict:

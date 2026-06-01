@@ -40,12 +40,8 @@ def crop_geometry(
     """Rectangle in original-frame coords that the model's input crop covers.
 
     Torchvision video backbones (e.g. mvit_v2_s) resize the shorter side to
-    ``resize_shorter`` then center-crop ``crop_size``. TAdaFormer resizes the
-    whole frame (no crop), so the rectangle is the full frame.
+    ``resize_shorter`` then center-crop ``crop_size``.
     """
-    if pre_model == "tadaformer_l14":
-        return CropGeometry(0.0, 0.0, float(orig_w), float(orig_h))
-
     scale = resize_shorter / float(min(orig_h, orig_w))
     resized_w = orig_w * scale
     resized_h = orig_h * scale
@@ -62,7 +58,6 @@ def crop_geometry(
 def compute_occlusion_saliency(
     model,
     mvclips,
-    view_ids,
     view: int = 0,
     grid: int = 6,
     occ_value: float = 0.0,
@@ -81,11 +76,10 @@ def compute_occlusion_saliency(
     cell_w = width / grid
 
     with torch.no_grad():
-        base = _foul_score(model, mvclips, view_ids)
+        base = _foul_score(model, mvclips)
 
     cells = [(gy, gx) for gy in range(grid) for gx in range(grid)]
     drops = np.zeros(len(cells), dtype=np.float32)
-    view_ids_chunk_cache: dict[int, "torch.Tensor"] = {}
 
     for start in range(0, len(cells), chunk):
         batch_cells = cells[start : start + chunk]
@@ -95,19 +89,17 @@ def compute_occlusion_saliency(
             y0, y1 = int(round(gy * cell_h)), int(round((gy + 1) * cell_h))
             x0, x1 = int(round(gx * cell_w)), int(round((gx + 1) * cell_w))
             masked[k, view, ..., y0:y1, x0:x1] = occ_value
-        if n not in view_ids_chunk_cache:
-            view_ids_chunk_cache[n] = view_ids.repeat(n, *([1] * (view_ids.dim() - 1)))
         with torch.no_grad():
-            scores = _foul_score(model, masked, view_ids_chunk_cache[n], reduce=False)
+            scores = _foul_score(model, masked, reduce=False)
         drops[start : start + n] = (base - scores).detach().cpu().numpy()
 
     return drops.reshape(grid, grid)
 
 
-def _foul_score(model, mvclips, view_ids, reduce: bool = True):
+def _foul_score(model, mvclips, reduce: bool = True):
     import torch
 
-    offence_logits, _, _ = model(mvclips, None, view_ids)
+    offence_logits, _, _ = model(mvclips, None)
     probs = torch.softmax(offence_logits, dim=-1)
     foulness = 1.0 - probs[:, 0]
     if reduce:

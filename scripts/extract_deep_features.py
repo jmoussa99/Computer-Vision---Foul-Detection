@@ -5,7 +5,7 @@ The deep net (foul detector) stays frozen and provides its pooled multi-view
 feature as "context". We pair each action's feature with its ground-truth
 Bodypart label (Upper/Under body) so a small head can be trained on top.
 
-Works for the original VARS video backbones (e.g. mvit_v2_s) and TAdaFormer.
+Works with the original VARS video backbones, such as mvit_v2_s.
 """
 
 from __future__ import annotations
@@ -45,11 +45,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-frame", type=int, default=65)
     parser.add_argument("--end-frame", type=int, default=85)
     parser.add_argument("--fps", type=int, default=21)
-    parser.add_argument("--sample-frames", type=int, default=None, help="Set for tadaformer-style sampling.")
-    parser.add_argument("--temporal-stride", type=int, default=2)
-    parser.add_argument("--input-height", type=int, default=280)
-    parser.add_argument("--input-width", type=int, default=490)
-    parser.add_argument("--tada-timm-model", default="vit_large_patch14_clip_224.openai")
     return parser
 
 
@@ -62,9 +57,6 @@ def main() -> int:
     model = MVNetwork(
         net_name=args.pre_model,
         agr_type=args.pooling_type,
-        tada_pretrained=False,
-        tada_input_size=(args.input_height, args.input_width),
-        tada_timm_model=args.tada_timm_model,
     ).to(device)
     checkpoint = torch.load(args.weights, map_location=device)
     state = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -87,8 +79,6 @@ def main() -> int:
             num_views=5,
             transform=transform_aug if use_aug else None,
             transform_model=transform_model,
-            sample_frames=args.sample_frames,
-            temporal_stride=args.temporal_stride,
         )
         count = len(dataset) if args.max_actions is None else min(args.max_actions, len(dataset))
 
@@ -105,15 +95,14 @@ def main() -> int:
                         if skipped_error <= 5:
                             print(f"  {split}: skip index {idx}: {exc}")
                         continue
-                    videos, view_ids, action_id = sample[2], sample[-2], sample[-1]
+                    videos, action_id = sample[2], sample[-1]
                     aid = str(action_id)
                     bodypart = annotations.get(aid, {}).get("Bodypart", "").strip()
                     if bodypart not in BODYPART_TO_INDEX:
                         skipped_label += 1
                         continue
                     mvclips = videos.unsqueeze(0).to(device).float()
-                    view_ids = view_ids.unsqueeze(0).to(device)
-                    out = model.extract_features(mvclips, view_ids=view_ids)
+                    out = model.extract_features(mvclips)
                     features = out[0] if isinstance(out, tuple) else out
                     records.append({
                         "action": aid,
@@ -142,14 +131,6 @@ def _transforms(args):
         transforms.ColorJitter(brightness=0.5, saturation=0.5, contrast=0.5),
         transforms.RandomHorizontalFlip(),
     ])
-
-    if args.pre_model == "tadaformer_l14":
-        transform_model = transforms.Compose([
-            transforms.Lambda(lambda x: x.float() / 255.0),
-            transforms.Resize((args.input_height, args.input_width), antialias=True),
-            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
-        ])
-        return transform_aug, transform_model
 
     from torchvision.models.video import (
         MC3_18_Weights,

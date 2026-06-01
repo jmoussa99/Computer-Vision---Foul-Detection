@@ -7,4 +7,3 @@ torch==1.13.1
 torchvision==0.14.1
 tqdm==4.65.0
 opencv-python>=4.8
-timm>=0.9.12
