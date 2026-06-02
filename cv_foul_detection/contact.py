@@ -9,6 +9,7 @@ approach (optionally within the central time window) is the contact.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
@@ -38,6 +39,8 @@ def find_pose_contact(
     max_distance_ratio: float = 0.0,
     motion_weight: float = 0.6,
     center_weight: float = 0.3,
+    saliency_fn: Callable[[float, float], float] | None = None,
+    saliency_weight: float = 0.0,
 ) -> PoseContact | None:
     """Return the most foul-like two-player contact across the frames.
 
@@ -48,6 +51,10 @@ def find_pose_contact(
     central time window; ``max_distance_ratio`` (>0) rejects pairs that never
     actually touch. ``motion_weight``/``center_weight`` in [0, 1] control how
     strongly motion/centeredness influence the choice (0 disables that cue).
+
+    ``saliency_fn`` (hybrid mode) maps a frame point to a deep-saliency value in
+    [0, 1]; with ``saliency_weight`` > 0 the search is biased toward where the
+    deep net looks, so the tightest contact *inside the foul region* wins.
 
     Returns ``None`` if no frame has two posed players touching closely enough.
     """
@@ -71,6 +78,8 @@ def find_pose_contact(
             max_distance_ratio,
             motion_weight,
             center_weight,
+            saliency_fn,
+            saliency_weight,
         )
         if candidate is None:
             continue
@@ -88,6 +97,46 @@ def find_pose_contact(
                 player_indices=(i, j),
             )
     return best
+
+
+def find_pose_contact_frame(
+    frame: np.ndarray,
+    frame_index: int,
+    players: list[PlayerPose],
+    keypoint_score_threshold: float = 2.0,
+    box_scale: float = 0.4,
+    max_distance_ratio: float = 0.0,
+    center_weight: float = 0.3,
+    saliency_fn: Callable[[float, float], float] | None = None,
+    saliency_weight: float = 0.0,
+) -> PoseContact | None:
+    """Return the best two-player contact in one already-posed frame."""
+    if len(players) < 2:
+        return None
+    candidate = _score_contacts(
+        players,
+        keypoint_score_threshold,
+        frame.shape,
+        None,
+        box_scale,
+        max_distance_ratio,
+        motion_weight=0.0,
+        center_weight=center_weight,
+        saliency_fn=saliency_fn,
+        saliency_weight=saliency_weight,
+    )
+    if candidate is None:
+        return None
+    score, distance, point, (i, j) = candidate
+    return PoseContact(
+        frame_index=frame_index,
+        frame=frame,
+        point=point,
+        box=_contact_box(point, players[i], players[j], box_scale, frame.shape),
+        distance=distance,
+        players=players,
+        player_indices=(i, j),
+    )
 
 
 def _motion_maps(frames: list[tuple[int, np.ndarray]]) -> dict[int, np.ndarray | None]:
@@ -108,6 +157,8 @@ def _score_contacts(
     max_distance_ratio: float,
     motion_weight: float,
     center_weight: float,
+    saliency_fn: Callable[[float, float], float] | None = None,
+    saliency_weight: float = 0.0,
 ):
     """Best-scoring player pair in one frame, or ``None``."""
     points = [_visible_points(p, threshold) for p in players]
@@ -141,6 +192,9 @@ def _score_contacts(
             center_score = 1.0 - min(float(np.hypot(point[0] - cx, point[1] - cy)) / half_diag, 1.0)
             center_factor = (1.0 - center_weight) + center_weight * center_score
             score = closeness * motion_factor * center_factor
+            if saliency_weight > 0.0 and saliency_fn is not None:
+                sal = float(np.clip(saliency_fn(point[0], point[1]), 0.0, 1.0))
+                score *= (1.0 - saliency_weight) + saliency_weight * sal
             if best is None or score > best[0]:
                 best = (score, distance, point, (i, j))
     return best

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -24,8 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from cv_foul_detection.bodypart import COARSE_BY_FINE, assign_bodypart
-from cv_foul_detection.contact import find_pose_contact
-from cv_foul_detection.deep_saliency import compute_occlusion_saliency, crop_geometry, peak_uv
+from cv_foul_detection.contact import find_pose_contact, find_pose_contact_frame
+from cv_foul_detection.deep_saliency import (
+    compute_occlusion_saliency,
+    crop_geometry,
+    weighted_centroid_uv,
+)
 from cv_foul_detection.dataset import iter_actions
 from cv_foul_detection.features import ClipFeatureExtractor, FeatureConfig, PeakContact
 from cv_foul_detection.io import write_json
@@ -39,8 +44,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default="outputs/foul_bodypart")
     parser.add_argument("--device", default=None, help="Torch device for pose/deep net (default: cuda if available).")
     parser.add_argument("--max-actions", type=int, default=None)
-    parser.add_argument("--render-video", action="store_true", help="Also write the full motion red-box overlay video.")
+    parser.add_argument(
+        "--render-video",
+        dest="render_video",
+        action="store_true",
+        default=True,
+        help="Write an MP4 with the final foul/contact overlay.",
+    )
+    parser.add_argument("--no-render-video", dest="render_video", action="store_false", help="Only write still-image overlays.")
     parser.add_argument("--eval", action="store_true", help="Score coarse body-part vs annotation Bodypart.")
+    parser.add_argument(
+        "--clip-selection",
+        default="replay-closeup",
+        choices=["replay-closeup", "closeup", "replay", "first"],
+        help="Which view to render/localize: prefer replay close-ups by default.",
+    )
+    parser.add_argument(
+        "--require-selected-view",
+        action="store_true",
+        help="Skip actions that do not have the requested replay/close-up view.",
+    )
+    parser.add_argument(
+        "--all-selected-clips",
+        action="store_true",
+        help="Output every clip matching --clip-selection for each action instead of only the best one.",
+    )
 
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--predictions", help="Deep-net prediction JSON (predicitions_*.json).")
@@ -69,14 +97,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Where the red box comes from.
     parser.add_argument(
         "--contact-source",
-        default="pose",
-        choices=["pose", "motion", "deep"],
-        help="pose: closest two-player skeleton contact (default); motion: legacy MOG2; "
-        "deep: where the deep net looks (occlusion saliency), snapped to the nearest player. Requires --weights.",
+        default="hybrid",
+        choices=["pose", "motion", "deep", "hybrid"],
+        help="hybrid (default): deep saliency picks the foul region, pose finds the tightest contact in it; "
+        "pose: closest two-player skeleton contact; motion: legacy MOG2; "
+        "deep: deep-net saliency peak snapped to the nearest player. deep/hybrid require --weights.",
     )
-    parser.add_argument("--saliency-grid", type=int, default=7, help="deep: occlusion grid resolution.")
-    parser.add_argument("--saliency-resize-shorter", type=int, default=256, help="deep: backbone resize shorter side.")
-    parser.add_argument("--saliency-alpha", type=float, default=0.45, help="deep: heatmap overlay opacity.")
+    parser.add_argument("--saliency-grid", type=int, default=7, help="deep/hybrid: occlusion grid resolution.")
+    parser.add_argument("--saliency-resize-shorter", type=int, default=256, help="backbone resize shorter side.")
+    parser.add_argument("--saliency-alpha", type=float, default=0.45, help="heatmap overlay opacity.")
+    parser.add_argument("--saliency-weight", type=float, default=1.0, help="hybrid: how strongly saliency gates pose [0..1]; 1 vetoes pairs outside the hot region.")
+    parser.add_argument("--saliency-min", type=float, default=0.15, help="hybrid: min saliency at the contact to trust the pose pair; else use the deep single-player box.")
     parser.add_argument("--contact-box-scale", type=float, default=0.4, help="Pose contact box size vs player height.")
     parser.add_argument("--max-pose-frames", type=int, default=32, help="Frames posed per clip when locating contact.")
     parser.add_argument("--contact-center-frac", type=float, default=0.6, help="Central time window searched for contact.")
@@ -123,7 +154,9 @@ def main() -> int:
     args = build_arg_parser().parse_args()
 
     device = _resolve_device(args.device)
-    predictions = _load_predictions(args, device)
+    annotations = _load_all_annotations(args.dataset, args.splits)
+    selected_views = _selected_views_from_annotations(args.dataset, args.splits, annotations, args.clip_selection)
+    predictions = _load_predictions(args, device, selected_views)
 
     extractor = ClipFeatureExtractor(
         FeatureConfig(
@@ -148,9 +181,9 @@ def main() -> int:
     index = []
     eval_pairs: list[tuple[str, str]] = []
     eval_pairs_deep: list[tuple[str, str]] = []
-    annotations = _load_all_annotations(args.dataset, args.splits) if args.eval else {}
     processed = 0
     skipped_no_contact = 0
+    skipped_view = 0
 
     for action in iter_actions(args.dataset, args.splits):
         if args.max_actions is not None and processed >= args.max_actions:
@@ -159,83 +192,125 @@ def main() -> int:
         if prediction.get("Offence", "").strip().lower() in ("", "no offence"):
             continue
 
-        live_clip = action.clips[0]
-        located = _locate_contact(live_clip, extractor, pose, args, prediction)
-        if located is None:
-            if args.require_two_players:
-                skipped_no_contact += 1
-                print(f"[{action.split}] action_{action.action_id}: skipped (no clear two-player contact)")
+        selected_clips = _select_action_clips(action, annotations, args.clip_selection, args.all_selected_clips)
+        if not selected_clips:
+            if args.require_selected_view:
+                skipped_view += 1
+                print(f"[{action.split}] action_{action.action_id}: skipped (no requested replay/close-up view)")
+                continue
+            selected_clips = [
+                {"path": action.clips[0], "clip_index": 0, "camera_type": "", "replay_speed": 1.0, "selected_reason": "first available"}
+            ]
+
+        action_records = []
+        for clip_info in selected_clips:
+            live_clip = clip_info["path"]
+            view_prediction = _prediction_for_view(prediction, int(clip_info["clip_index"]))
+            located = _locate_contact(live_clip, extractor, pose, args, view_prediction)
+            if located is None:
+                if args.require_two_players:
+                    skipped_no_contact += 1
+                    print(
+                        f"[{action.split}] action_{action.action_id}/{live_clip.stem}: "
+                        "skipped (no clear two-player contact)"
+                    )
+                continue
+
+            contact_point = located["contact_point"]
+            players = located["players"]
+            assignment = (
+                assign_bodypart(contact_point, players, keypoint_score_threshold=args.keypoint_score_threshold)
+                if contact_point is not None and players
+                else None
+            )
+
+            action_out = output / action.split / f"action_{action.action_id}"
+            action_out.mkdir(parents=True, exist_ok=True)
+
+            context_text = _context_text(view_prediction)
+            overlay = _draw_overlay(
+                located["frame"],
+                players,
+                located["contact_box"],
+                contact_point,
+                assignment,
+                context_text,
+                args.keypoint_score_threshold,
+                view_prediction.get("BodypartDeep"),
+                saliency=located.get("saliency"),
+                saliency_rect=located.get("saliency_rect"),
+                saliency_alpha=args.saliency_alpha,
+            )
+            overlay_image = action_out / f"{live_clip.stem}_contact_bodypart.png"
+            cv2.imwrite(str(overlay_image), overlay)
+
+            video_path = None
+            if args.render_video:
+                video_path = action_out / f"{live_clip.stem}_foul_detection.mp4"
+                _write_foul_overlay_video(
+                    live_clip,
+                    video_path,
+                    extractor,
+                    pose,
+                    located,
+                    assignment,
+                    context_text,
+                    args,
+                    view_prediction.get("BodypartDeep"),
+                )
+
+            record = {
+                "split": action.split,
+                "action_id": action.action_id,
+                "clip": str(live_clip),
+                "clip_index": clip_info["clip_index"],
+                "camera_type": clip_info.get("camera_type", ""),
+                "replay_speed": clip_info.get("replay_speed", 1.0),
+                "clip_selected_reason": clip_info.get("selected_reason", ""),
+                "deep_prediction": {
+                    k: v for k, v in view_prediction.items() if k not in ("Saliency", "SaliencyByView", "SaliencyCrop")
+                },
+                "contact_source": args.contact_source,
+                "contact_frame_index": located["frame_index"],
+                "contact_box": located["contact_box"],
+                "players_detected": len(players),
+                "bodypart": _assignment_dict(assignment),
+                "bodypart_deep": view_prediction.get("BodypartDeep"),
+                "overlay_image": str(overlay_image),
+                "overlay_video": str(video_path) if video_path else None,
+            }
+            write_json(action_out / f"{live_clip.stem}_bodypart.json", record)
+            action_records.append(record)
+            index.append(record)
+
+            print(
+                f"[{action.split}] action_{action.action_id}/{live_clip.stem}: "
+                f"{_assignment_dict(assignment)['fine'] if assignment else 'unknown'} "
+                f"({len(players)} players, source={args.contact_source}, "
+                f"camera={clip_info.get('camera_type', 'unknown') or 'unknown'})"
+            )
+
+        if not action_records:
             continue
 
-        contact_point = located["contact_point"]
-        players = located["players"]
-        assignment = (
-            assign_bodypart(contact_point, players, keypoint_score_threshold=args.keypoint_score_threshold)
-            if contact_point is not None and players
-            else None
-        )
-
-        action_out = output / action.split / f"action_{action.action_id}"
-        action_out.mkdir(parents=True, exist_ok=True)
-
-        context_text = _context_text(prediction)
-        overlay = _draw_overlay(
-            located["frame"],
-            players,
-            located["contact_box"],
-            contact_point,
-            assignment,
-            context_text,
-            args.keypoint_score_threshold,
-            prediction.get("BodypartDeep"),
-            saliency=located.get("saliency"),
-            saliency_rect=located.get("saliency_rect"),
-            saliency_alpha=args.saliency_alpha,
-        )
-        overlay_image = action_out / "contact_bodypart.png"
-        cv2.imwrite(str(overlay_image), overlay)
-
-        video_path = None
-        if args.render_video:
-            video_path = action_out / f"{live_clip.stem}_overlay.mp4"
-            extractor.extract_clip(live_clip, overlay_path=video_path)
-
-        record = {
-            "split": action.split,
-            "action_id": action.action_id,
-            "clip": str(live_clip),
-            "deep_prediction": {k: v for k, v in prediction.items() if k not in ("Saliency", "SaliencyCrop")},
-            "contact_source": args.contact_source,
-            "contact_frame_index": located["frame_index"],
-            "contact_box": located["contact_box"],
-            "players_detected": len(players),
-            "bodypart": _assignment_dict(assignment),
-            "bodypart_deep": prediction.get("BodypartDeep"),
-            "overlay_image": str(overlay_image),
-            "overlay_video": str(video_path) if video_path else None,
-        }
-        write_json(action_out / "bodypart.json", record)
-        index.append(record)
+        write_json(output / action.split / f"action_{action.action_id}" / "bodypart.json", action_records[0])
         processed += 1
 
         if args.eval:
             truth = annotations.get(action.split, {}).get(str(action.action_id), {}).get("Bodypart", "").strip()
             if truth in ("Upper body", "Under body"):
-                if assignment is not None:
-                    eval_pairs.append((assignment.coarse, truth))
+                first_assignment = action_records[0]["bodypart"]
+                if first_assignment["coarse"] in ("Upper body", "Under body"):
+                    eval_pairs.append((first_assignment["coarse"], truth))
                 if prediction.get("BodypartDeep"):
                     eval_pairs_deep.append((prediction["BodypartDeep"], truth))
-
-        print(
-            f"[{action.split}] action_{action.action_id}: "
-            f"{_assignment_dict(assignment)['fine'] if assignment else 'unknown'} "
-            f"({len(players)} players, source={args.contact_source})"
-        )
 
     write_json(output / "index.json", index)
     print(f"Wrote {processed} body-part records. Index: {output / 'index.json'}")
     if args.require_two_players:
         print(f"Skipped {skipped_no_contact} actions without a clear two-player contact.")
+    if args.require_selected_view:
+        print(f"Skipped {skipped_view} actions without the requested replay/close-up view.")
 
     if args.eval:
         report = _eval_report(eval_pairs)
@@ -275,7 +350,15 @@ def _locate_contact(live_clip, extractor, pose, args, prediction=None) -> dict |
             return located
         # Fall through to motion if saliency is unavailable.
 
-    if args.contact_source == "pose":
+    if args.contact_source == "hybrid":
+        located = _locate_contact_hybrid(live_clip, extractor, pose, args, prediction or {})
+        if located is not None:
+            return located
+        if args.require_two_players:
+            return None
+        # No saliency or no contact: fall through to the plain pose search below.
+
+    if args.contact_source in ("pose", "hybrid"):
         frames = extractor.read_frames(live_clip)
         contact = find_pose_contact(
             frames,
@@ -334,7 +417,7 @@ def _locate_contact_deep(live_clip, extractor, pose, args, prediction: dict) -> 
     scale_x = display_w / float(orig_w)
     scale_y = display_h / float(orig_h)
 
-    u, v = peak_uv(salmap)
+    u, v = weighted_centroid_uv(salmap)
     px, py = geometry.uv_to_point(u, v)
     peak_point = (px * scale_x, py * scale_y)
 
@@ -366,6 +449,86 @@ def _locate_contact_deep(live_clip, extractor, pose, args, prediction: dict) -> 
     }
 
 
+def _locate_contact_hybrid(live_clip, extractor, pose, args, prediction: dict) -> dict | None:
+    """Deep saliency picks the foul region; pose finds the tightest contact in it."""
+    saliency = prediction.get("Saliency")
+    if not saliency:
+        return None
+    salmap = np.asarray(saliency, dtype=np.float32)
+
+    frames = extractor.read_frames(live_clip)
+    if not frames:
+        return None
+    display_h, display_w = frames[0][1].shape[:2]
+
+    orig_h, orig_w = _original_frame_size(live_clip)
+    geometry = crop_geometry(args.pre_model, orig_h, orig_w, resize_shorter=args.saliency_resize_shorter)
+    scale_x = display_w / float(orig_w)
+    scale_y = display_h / float(orig_h)
+    sampler = _make_saliency_sampler(salmap, geometry, scale_x, scale_y)
+
+    contact = find_pose_contact(
+        frames,
+        pose,
+        keypoint_score_threshold=args.keypoint_score_threshold,
+        box_scale=args.contact_box_scale,
+        max_pose_frames=args.max_pose_frames,
+        center_frac=args.contact_center_frac,
+        max_distance_ratio=args.max_contact_distance_ratio if args.require_two_players else 0.0,
+        motion_weight=args.contact_motion_weight,
+        center_weight=args.contact_center_weight,
+        saliency_fn=sampler,
+        saliency_weight=args.saliency_weight,
+    )
+    # Trust the tight two-player box only if it actually sits in the foul region;
+    # otherwise fall back to the deep single-player localization.
+    if contact is None or sampler(contact.point[0], contact.point[1]) < args.saliency_min:
+        if args.require_two_players:
+            return None
+        return _locate_contact_deep(live_clip, extractor, pose, args, prediction)
+
+    crop_box = (
+        int(geometry.x1 * scale_x),
+        int(geometry.y1 * scale_y),
+        int(geometry.x2 * scale_x),
+        int(geometry.y2 * scale_y),
+    )
+    return {
+        "frame": contact.frame,
+        "frame_index": contact.frame_index,
+        "contact_point": contact.point,
+        "contact_box": list(contact.box),
+        "players": contact.players,
+        "saliency": salmap,
+        "saliency_rect": crop_box,
+    }
+
+
+def _make_saliency_sampler(salmap: np.ndarray, geometry, scale_x: float, scale_y: float):
+    sal = np.clip(salmap.astype(np.float32), 0.0, None)
+    if sal.max() > 1e-9:
+        sal = sal / sal.max()
+    grid_h, grid_w = sal.shape
+    span_x = max(geometry.x2 - geometry.x1, 1e-6)
+    span_y = max(geometry.y2 - geometry.y1, 1e-6)
+
+    def sample(x: float, y: float) -> float:
+        u = ((x / scale_x) - geometry.x1) / span_x
+        v = ((y / scale_y) - geometry.y1) / span_y
+        if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+            return 0.0
+        gx = min(max(u * grid_w - 0.5, 0.0), grid_w - 1)
+        gy = min(max(v * grid_h - 0.5, 0.0), grid_h - 1)
+        x0, y0 = int(np.floor(gx)), int(np.floor(gy))
+        x1, y1 = min(x0 + 1, grid_w - 1), min(y0 + 1, grid_h - 1)
+        fx, fy = gx - x0, gy - y0
+        top = sal[y0, x0] * (1 - fx) + sal[y0, x1] * fx
+        bottom = sal[y1, x0] * (1 - fx) + sal[y1, x1] * fx
+        return float(top * (1 - fy) + bottom * fy)
+
+    return sample
+
+
 def _snap_to_player(point, players: list[PlayerPose], kp_threshold: float):
     best = None
     best_dist = float("inf")
@@ -394,6 +557,122 @@ def _original_frame_size(clip_path) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         return (720, 1280)
     return (int(height), int(width))
+
+
+def _clip_index(path: Path | str) -> int:
+    match = re.search(r"clip_(\d+)", str(path))
+    return int(match.group(1)) if match else 0
+
+
+def _selected_views_from_annotations(
+    dataset_root: str,
+    splits: list[str],
+    annotations: dict,
+    clip_selection: str,
+) -> dict[tuple[str, str], int]:
+    selected: dict[tuple[str, str], int] = {}
+    for action in iter_actions(dataset_root, splits):
+        choice = _select_action_clip(action, annotations, clip_selection)
+        selected[(action.split, str(action.action_id))] = int(choice["clip_index"]) if choice is not None else 0
+    return selected
+
+
+def _select_action_clip(action, annotations: dict, clip_selection: str) -> dict | None:
+    choices = _select_action_clips(action, annotations, clip_selection, all_selected=False)
+    return choices[0] if choices else None
+
+
+def _select_action_clips(action, annotations: dict, clip_selection: str, all_selected: bool) -> list[dict]:
+    if clip_selection == "first":
+        return [_clip_choice(action.clips[0], {}, "first available")]
+
+    action_meta = annotations.get(action.split, {}).get(str(action.action_id), {})
+    clip_meta_by_index = {
+        _clip_index(clip.get("Url", "")): clip
+        for clip in action_meta.get("Clips", [])
+        if isinstance(clip, dict)
+    }
+    choices = [_clip_choice(path, clip_meta_by_index.get(_clip_index(path), {}), "") for path in action.clips]
+    if not choices:
+        return []
+
+    eligible = [choice for choice in choices if _matches_clip_selection(choice, clip_selection)]
+    if not eligible:
+        return []
+
+    if all_selected:
+        selected = sorted(eligible, key=lambda choice: int(choice.get("clip_index") or 0))
+    else:
+        selected = [max(eligible, key=lambda choice: _clip_selection_score(choice, clip_selection))]
+    for choice in selected:
+        choice["selected_reason"] = _clip_reason(choice)
+    return selected
+
+
+def _clip_choice(path: Path, metadata: dict, reason: str) -> dict:
+    return {
+        "path": path,
+        "clip_index": _clip_index(path),
+        "camera_type": metadata.get("Camera type", ""),
+        "replay_speed": float(metadata.get("Replay speed") or 1.0),
+        "selected_reason": reason,
+    }
+
+
+def _matches_clip_selection(choice: dict, clip_selection: str) -> bool:
+    if clip_selection == "closeup":
+        return _is_closeup(choice)
+    if clip_selection == "replay":
+        return _is_replay(choice)
+    return _is_closeup(choice) or _is_replay(choice)
+
+
+def _clip_selection_score(choice: dict, clip_selection: str) -> tuple[float, int]:
+    closeup = _is_closeup(choice)
+    replay = _is_replay(choice)
+    speed = float(choice.get("replay_speed") or 1.0)
+    score = 0.0
+    if clip_selection == "closeup":
+        score += 100.0 if closeup else 0.0
+    elif clip_selection == "replay":
+        score += 100.0 if replay else 0.0
+    else:
+        score += 120.0 if closeup and replay else 0.0
+        score += 70.0 if closeup else 0.0
+        score += 50.0 if replay else 0.0
+    score += min(max(speed - 1.0, 0.0), 4.0) * 10.0
+    return (score, int(choice.get("clip_index") or 0))
+
+
+def _clip_reason(choice: dict) -> str:
+    parts = []
+    if _is_replay(choice):
+        parts.append("replay")
+    if _is_closeup(choice):
+        parts.append("close-up")
+    return ", ".join(parts) if parts else "selected"
+
+
+def _is_replay(choice: dict) -> bool:
+    return int(choice.get("clip_index") or 0) > 0 or float(choice.get("replay_speed") or 1.0) > 1.01
+
+
+def _is_closeup(choice: dict) -> bool:
+    camera = str(choice.get("camera_type") or "").lower().replace("-", " ")
+    return "close up" in camera
+
+
+def _prediction_for_view(prediction: dict, clip_index: int) -> dict:
+    saliency_by_view = prediction.get("SaliencyByView")
+    if not isinstance(saliency_by_view, dict):
+        return prediction
+    view_key = str(clip_index)
+    if view_key not in saliency_by_view:
+        return prediction
+    result = dict(prediction)
+    result["Saliency"] = saliency_by_view[view_key]
+    result["SaliencyView"] = clip_index
+    return result
 
 
 def _assignment_dict(assignment) -> dict:
@@ -467,6 +746,103 @@ def _draw_overlay(
     return overlay
 
 
+def _write_foul_overlay_video(
+    clip_path,
+    output_path,
+    extractor,
+    pose,
+    located: dict,
+    assignment,
+    context_text: str,
+    args,
+    bodypart_deep: str | None,
+) -> None:
+    frames = extractor.read_frames(clip_path)
+    if not frames:
+        return
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    first = frames[0][1]
+    fps = max(_video_fps(clip_path) / max(args.frame_stride, 1), 1.0)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (first.shape[1], first.shape[0]),
+    )
+
+    saliency_fn = None
+    if located.get("saliency") is not None:
+        orig_h, orig_w = _original_frame_size(clip_path)
+        geometry = crop_geometry(args.pre_model, orig_h, orig_w, resize_shorter=args.saliency_resize_shorter)
+        saliency_fn = _make_saliency_sampler(
+            np.asarray(located["saliency"], dtype=np.float32),
+            geometry,
+            first.shape[1] / float(orig_w),
+            first.shape[0] / float(orig_h),
+        )
+
+    for frame_index, frame in frames:
+        frame_players = pose.estimate(frame)
+        frame_contact = find_pose_contact_frame(
+            frame,
+            frame_index,
+            frame_players,
+            keypoint_score_threshold=args.keypoint_score_threshold,
+            box_scale=args.contact_box_scale,
+            max_distance_ratio=args.max_contact_distance_ratio if args.require_two_players else 0.0,
+            center_weight=args.contact_center_weight,
+            saliency_fn=saliency_fn,
+            saliency_weight=args.saliency_weight if args.contact_source == "hybrid" else 0.0,
+        )
+        if (
+            frame_contact is not None
+            and args.contact_source == "hybrid"
+            and saliency_fn is not None
+            and saliency_fn(frame_contact.point[0], frame_contact.point[1]) < args.saliency_min
+        ):
+            frame_contact = None
+
+        if frame_contact is None:
+            frame_point = None
+            frame_box = None
+            frame_assignment = None
+        else:
+            frame_point = frame_contact.point
+            frame_box = list(frame_contact.box)
+            frame_assignment = (
+                assign_bodypart(frame_point, frame_players, keypoint_score_threshold=args.keypoint_score_threshold)
+                if frame_players
+                else None
+            )
+
+        overlay = _draw_overlay(
+            frame,
+            frame_players,
+            frame_box,
+            frame_point,
+            frame_assignment,
+            context_text,
+            args.keypoint_score_threshold,
+            bodypart_deep,
+            saliency=located.get("saliency"),
+            saliency_rect=located.get("saliency_rect"),
+            saliency_alpha=args.saliency_alpha,
+        )
+        if frame_index == located["frame_index"]:
+            cv2.rectangle(overlay, (4, 4), (overlay.shape[1] - 5, overlay.shape[0] - 5), (255, 255, 255), 2)
+        writer.write(overlay)
+    writer.release()
+
+
+def _video_fps(clip_path) -> float:
+    cap = cv2.VideoCapture(str(clip_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return float(fps) if fps and fps > 0 else 25.0
+
+
 def _blend_saliency(image: np.ndarray, saliency: np.ndarray, rect, alpha: float) -> np.ndarray:
     x1, y1, x2, y2 = rect
     x1 = max(0, min(x1, image.shape[1] - 1))
@@ -495,14 +871,14 @@ def _put_label(image: np.ndarray, text: str, y: int) -> None:
     cv2.putText(image, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def _load_predictions(args, device: str) -> dict:
+def _load_predictions(args, device: str, selected_views: dict[tuple[str, str], int]) -> dict:
     if args.predictions:
         with Path(args.predictions).open(encoding="utf-8") as f:
             return json.load(f).get("Actions", {})
-    return _predict_with_weights(args, device)
+    return _predict_with_weights(args, device, selected_views)
 
 
-def _predict_with_weights(args, device: str) -> dict:
+def _predict_with_weights(args, device: str, selected_views: dict[tuple[str, str], int]) -> dict:
     import torch
 
     sys.path.insert(0, str(ROOT / "VARS model"))
@@ -561,11 +937,15 @@ def _predict_with_weights(args, device: str) -> dict:
                     features = out[0] if isinstance(out, tuple) else out
                     bp = int(torch.argmax(bodypart_head(features).detach().cpu(), dim=-1).item())
                     entry["BodypartDeep"] = index_to_bodypart[bp]
-                if args.contact_source == "deep" and offence != "No offence":
-                    salmap = compute_occlusion_saliency(model, mvclips, view=0, grid=args.saliency_grid)
+                action_key = str(action_id[0])
+                if args.contact_source in ("deep", "hybrid") and offence != "No offence":
+                    selected_view = selected_views.get((split, action_key), 0)
+                    selected_view = min(max(int(selected_view), 0), int(mvclips.shape[1]) - 1)
+                    salmap = compute_occlusion_saliency(model, mvclips, view=selected_view, grid=args.saliency_grid)
                     entry["Saliency"] = salmap.tolist()
+                    entry["SaliencyView"] = selected_view
                     entry["SaliencyCrop"] = int(mvclips.shape[-1])
-                predictions[str(action_id[0])] = entry
+                predictions[action_key] = entry
     return predictions
 
 

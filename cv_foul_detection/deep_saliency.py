@@ -113,3 +113,24 @@ def peak_uv(saliency: np.ndarray) -> tuple[float, float]:
     flat = int(np.argmax(saliency))
     gy, gx = divmod(flat, grid_w)
     return ((gx + 0.5) / grid_w, (gy + 0.5) / grid_h)
+
+
+def weighted_centroid_uv(saliency: np.ndarray, power: float = 3.0) -> tuple[float, float]:
+    """Intensity-weighted center (u, v) in [0, 1] of the saliency.
+
+    More stable than :func:`peak_uv` when there are several hotspots. ``power``
+    sharpens the weighting toward the strongest cells; falls back to the peak if
+    the map is empty.
+    """
+    grid_h, grid_w = saliency.shape
+    weights = np.clip(saliency.astype(np.float64), 0.0, None)
+    if weights.max() <= 1e-9:
+        return peak_uv(saliency)
+    weights = (weights / weights.max()) ** power
+    total = weights.sum()
+    if total <= 1e-9:
+        return peak_uv(saliency)
+    ys, xs = np.mgrid[0:grid_h, 0:grid_w]
+    u = float((weights * (xs + 0.5)).sum() / total) / grid_w
+    v = float((weights * (ys + 0.5)).sum() / total) / grid_h
+    return (u, v)

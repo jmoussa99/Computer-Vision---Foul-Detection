@@ -83,7 +83,7 @@ python scripts/recognize_foul_bodypart.py \
   --predictions "VARS model/predicitions_valid.json" \
   --output outputs/foul_bodypart \
   --device cuda \
-  --render-video \
+  --contact-source pose \
   --eval
 ```
 
@@ -101,25 +101,46 @@ python scripts/recognize_foul_bodypart.py \
   --fps 21 \
   --output outputs/foul_bodypart \
   --device cuda \
+  --clip-selection replay-closeup \
   --eval
 ```
 
 Useful options:
 
-- `--contact-source pose`: default; red box comes from closest skeleton contact.
+- `--contact-source hybrid`: default; deep saliency picks the foul region and
+  gates the pose search, so the tightest two-player contact *inside* the foul
+  region wins. Falls back to the deep single-player box when no contact sits in
+  the region. Requires `--weights`.
+- `--contact-source pose`: red box comes from the closest skeleton contact.
 - `--contact-source motion`: red box comes from motion/contact blobs.
 - `--contact-source deep`: red box comes from occlusion saliency over the deep
-  model's foul score.
+  model's foul score (intensity-weighted center snapped to the nearest player).
+  Requires `--weights`.
+- `--clip-selection replay-closeup`: default; render/localize the replay or
+  close-up clip when one is available instead of always using `clip_0`.
+- `--clip-selection replay --all-selected-clips`: render/localize every replay
+  clip available for each kept action.
+- `--require-selected-view`: skip actions that do not have the requested replay
+  or close-up view.
+- `--render-video` / `--no-render-video`: MP4 foul-overlay output is enabled by
+  default; use `--no-render-video` for still images only.
 - `--require-two-players`: skip actions when pose cannot find a clear two-player
   contact.
 - `--max-contact-distance-ratio 0.25`: require the two posed players to be very
   close before accepting a contact.
+- Saliency knobs (deep/hybrid): `--saliency-grid` (occlusion resolution),
+  `--saliency-resize-shorter`, `--saliency-alpha` (heatmap opacity),
+  `--saliency-weight` (hybrid gate strength), `--saliency-min` (hybrid fallback
+  threshold).
 
 Outputs under `--output/<split>/action_<id>/`:
 
 - `contact_bodypart.png`: contact frame with skeletons and red contact box.
 - `bodypart.json`: prediction, contact box, body-part assignment, and metadata.
-- `clip_0_overlay.mp4`: optional full overlay video when `--render-video` is set.
+- `clip_<n>_foul_detection.mp4`: selected replay/close-up clip with the same
+  foul/contact overlay used in the still image.
+- `clip_<n>_bodypart.json` and `clip_<n>_contact_bodypart.png`: per-clip
+  metadata and still frame when multiple clips are rendered.
 - `index.json`: project-level index of processed actions.
 - `bodypart_eval.json`: coarse body-part accuracy when `--eval` is set.
 
