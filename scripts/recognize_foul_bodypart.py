@@ -785,6 +785,7 @@ def _write_foul_overlay_video(
     context_text: str,
     args,
     bodypart_deep: str | None,
+    progress_cb=None,
 ) -> None:
     frames = extractor.read_frames(clip_path)
     if not frames:
@@ -820,7 +821,8 @@ def _write_foul_overlay_video(
             first.shape[0] / float(orig_h),
         )
 
-    for frame_index, frame in frames:
+    total = len(frames)
+    for idx, (frame_index, frame) in enumerate(frames):
         frame_players = pose.estimate(frame)
         frame_contact = find_pose_contact_frame(
             frame,
@@ -871,6 +873,15 @@ def _write_foul_overlay_video(
             cv2.rectangle(overlay, (4, 4), (overlay.shape[1] - 5, overlay.shape[0] - 5), (255, 255, 255), 2)
         writer.write(overlay)
         box_writer.write(_draw_box_only_overlay(frame, frame_box))
+        if progress_cb is not None and total:
+            try:
+                # Map frame progress to [50, 99]
+                pct = int(50 + 49.0 * (float(idx + 1) / float(total)))
+                if pct > 99:
+                    pct = 99
+                progress_cb(pct)
+            except Exception:
+                pass
     writer.release()
     box_writer.release()
 
