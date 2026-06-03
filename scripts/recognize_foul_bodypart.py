@@ -69,6 +69,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Output every clip matching --clip-selection for each action instead of only the best one.",
     )
+    parser.add_argument(
+        "--include-original-clip",
+        action="store_true",
+        help="Also output clip_0, the original broadcast/main-view clip, for limitation comparisons.",
+    )
 
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--predictions", help="Deep-net prediction JSON (predicitions_*.json).")
@@ -201,6 +206,8 @@ def main() -> int:
             selected_clips = [
                 {"path": action.clips[0], "clip_index": 0, "camera_type": "", "replay_speed": 1.0, "selected_reason": "first available"}
             ]
+        if args.include_original_clip:
+            selected_clips = _with_original_clip(action, annotations, selected_clips)
 
         action_records = []
         for clip_info in selected_clips:
@@ -245,11 +252,14 @@ def main() -> int:
             cv2.imwrite(str(overlay_image), overlay)
 
             video_path = None
+            box_video_path = None
             if args.render_video:
                 video_path = action_out / f"{live_clip.stem}_foul_detection.mp4"
+                box_video_path = action_out / f"{live_clip.stem}_foul_box.mp4"
                 _write_foul_overlay_video(
                     live_clip,
                     video_path,
+                    box_video_path,
                     extractor,
                     pose,
                     located,
@@ -278,6 +288,7 @@ def main() -> int:
                 "bodypart_deep": view_prediction.get("BodypartDeep"),
                 "overlay_image": str(overlay_image),
                 "overlay_video": str(video_path) if video_path else None,
+                "box_only_video": str(box_video_path) if box_video_path else None,
             }
             write_json(action_out / f"{live_clip.stem}_bodypart.json", record)
             action_records.append(record)
@@ -586,12 +597,7 @@ def _select_action_clips(action, annotations: dict, clip_selection: str, all_sel
     if clip_selection == "first":
         return [_clip_choice(action.clips[0], {}, "first available")]
 
-    action_meta = annotations.get(action.split, {}).get(str(action.action_id), {})
-    clip_meta_by_index = {
-        _clip_index(clip.get("Url", "")): clip
-        for clip in action_meta.get("Clips", [])
-        if isinstance(clip, dict)
-    }
+    clip_meta_by_index = _clip_metadata_by_index(action, annotations)
     choices = [_clip_choice(path, clip_meta_by_index.get(_clip_index(path), {}), "") for path in action.clips]
     if not choices:
         return []
@@ -607,6 +613,23 @@ def _select_action_clips(action, annotations: dict, clip_selection: str, all_sel
     for choice in selected:
         choice["selected_reason"] = _clip_reason(choice)
     return selected
+
+
+def _with_original_clip(action, annotations: dict, selected_clips: list[dict]) -> list[dict]:
+    if not action.clips or any(int(choice.get("clip_index") or 0) == 0 for choice in selected_clips):
+        return selected_clips
+    metadata = _clip_metadata_by_index(action, annotations).get(0, {})
+    original = _clip_choice(action.clips[0], metadata, "original broadcast view")
+    return [original, *selected_clips]
+
+
+def _clip_metadata_by_index(action, annotations: dict) -> dict[int, dict]:
+    action_meta = annotations.get(action.split, {}).get(str(action.action_id), {})
+    return {
+        _clip_index(clip.get("Url", "")): clip
+        for clip in action_meta.get("Clips", [])
+        if isinstance(clip, dict)
+    }
 
 
 def _clip_choice(path: Path, metadata: dict, reason: str) -> dict:
@@ -665,6 +688,11 @@ def _is_closeup(choice: dict) -> bool:
 def _prediction_for_view(prediction: dict, clip_index: int) -> dict:
     saliency_by_view = prediction.get("SaliencyByView")
     if not isinstance(saliency_by_view, dict):
+        if prediction.get("SaliencyView") is not None and int(prediction["SaliencyView"]) != clip_index:
+            result = dict(prediction)
+            result.pop("Saliency", None)
+            result.pop("SaliencyView", None)
+            return result
         return prediction
     view_key = str(clip_index)
     if view_key not in saliency_by_view:
@@ -749,6 +777,7 @@ def _draw_overlay(
 def _write_foul_overlay_video(
     clip_path,
     output_path,
+    box_output_path,
     extractor,
     pose,
     located: dict,
@@ -763,10 +792,18 @@ def _write_foul_overlay_video(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    box_output_path = Path(box_output_path)
+    box_output_path.parent.mkdir(parents=True, exist_ok=True)
     first = frames[0][1]
     fps = max(_video_fps(clip_path) / max(args.frame_stride, 1), 1.0)
     writer = cv2.VideoWriter(
         str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (first.shape[1], first.shape[0]),
+    )
+    box_writer = cv2.VideoWriter(
+        str(box_output_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
         (first.shape[1], first.shape[0]),
@@ -833,7 +870,9 @@ def _write_foul_overlay_video(
         if frame_index == located["frame_index"]:
             cv2.rectangle(overlay, (4, 4), (overlay.shape[1] - 5, overlay.shape[0] - 5), (255, 255, 255), 2)
         writer.write(overlay)
+        box_writer.write(_draw_box_only_overlay(frame, frame_box))
     writer.release()
+    box_writer.release()
 
 
 def _video_fps(clip_path) -> float:
@@ -841,6 +880,14 @@ def _video_fps(clip_path) -> float:
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
     return float(fps) if fps and fps > 0 else 25.0
+
+
+def _draw_box_only_overlay(frame: np.ndarray, contact_box) -> np.ndarray:
+    overlay = frame.copy()
+    if contact_box is not None:
+        x1, y1, x2, y2 = contact_box
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    return overlay
 
 
 def _blend_saliency(image: np.ndarray, saliency: np.ndarray, rect, alpha: float) -> np.ndarray:
@@ -916,6 +963,7 @@ def _predict_with_weights(args, device: str, selected_views: dict[tuple[str, str
             transform=None,
             transform_model=transform_model,
         )
+        _drop_unreadable_actions(dataset, split)
         loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
         with torch.no_grad():
             for batch in loader:
@@ -947,6 +995,53 @@ def _predict_with_weights(args, device: str, selected_views: dict[tuple[str, str
                     entry["SaliencyCrop"] = int(mvclips.shape[-1])
                 predictions[action_key] = entry
     return predictions
+
+
+def _drop_unreadable_actions(dataset, split: str) -> None:
+    keep = []
+    skipped = []
+    for index, clip_paths in enumerate(dataset.clips):
+        bad = [str(path) for path in clip_paths if not _can_read_clip(path)]
+        if bad:
+            action_id = str(dataset.number_of_actions[index]) if hasattr(dataset, "number_of_actions") else str(index)
+            skipped.append((action_id, bad))
+            continue
+        keep.append(index)
+
+    if not skipped:
+        return
+
+    dataset.clips = [dataset.clips[index] for index in keep]
+    dataset.length = len(dataset.clips)
+    if hasattr(dataset, "labels_offence_severity"):
+        dataset.labels_offence_severity = _subset_dataset_field(dataset.labels_offence_severity, keep)
+    if hasattr(dataset, "labels_action"):
+        dataset.labels_action = _subset_dataset_field(dataset.labels_action, keep)
+    if hasattr(dataset, "number_of_actions"):
+        dataset.number_of_actions = _subset_dataset_field(dataset.number_of_actions, keep)
+
+    print(f"[{split}] skipped {len(skipped)} actions with unreadable/corrupt clips before deep inference.")
+    for action_id, bad in skipped[:10]:
+        print(f"[{split}] action_{action_id}: unreadable clip(s): {', '.join(bad)}")
+    if len(skipped) > 10:
+        print(f"[{split}] ... plus {len(skipped) - 10} more unreadable actions.")
+
+
+def _subset_dataset_field(field, keep: list[int]):
+    try:
+        return field[keep]
+    except (TypeError, IndexError):
+        return [field[index] for index in keep]
+
+
+def _can_read_clip(path) -> bool:
+    path = Path(path)
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    cap = cv2.VideoCapture(str(path))
+    ok, _ = cap.read()
+    cap.release()
+    return bool(ok)
 
 
 def _load_bodypart_head(path: str, device):

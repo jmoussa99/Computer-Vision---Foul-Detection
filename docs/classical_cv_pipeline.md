@@ -120,6 +120,8 @@ Useful options:
   close-up clip when one is available instead of always using `clip_0`.
 - `--clip-selection replay --all-selected-clips`: render/localize every replay
   clip available for each kept action.
+- `--include-original-clip`: also render/localize `clip_0`, the original
+  broadcast/main view, alongside selected replay clips for limitation examples.
 - `--require-selected-view`: skip actions that do not have the requested replay
   or close-up view.
 - `--render-video` / `--no-render-video`: MP4 foul-overlay output is enabled by
@@ -139,6 +141,8 @@ Outputs under `--output/<split>/action_<id>/`:
 - `bodypart.json`: prediction, contact box, body-part assignment, and metadata.
 - `clip_<n>_foul_detection.mp4`: selected replay/close-up clip with the same
   foul/contact overlay used in the still image.
+- `clip_<n>_foul_box.mp4`: selected replay/close-up clip with only the moving
+  red foul/contact box and no pose skeleton/body-part labels.
 - `clip_<n>_bodypart.json` and `clip_<n>_contact_bodypart.png`: per-clip
   metadata and still frame when multiple clips are rendered.
 - `index.json`: project-level index of processed actions.
