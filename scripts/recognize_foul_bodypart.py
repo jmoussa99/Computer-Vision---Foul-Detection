@@ -115,6 +115,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--saliency-min", type=float, default=0.15, help="hybrid: min saliency at the contact to trust the pose pair; else use the deep single-player box.")
     parser.add_argument("--contact-box-scale", type=float, default=0.4, help="Pose contact box size vs player height.")
     parser.add_argument("--max-pose-frames", type=int, default=32, help="Frames posed per clip when locating contact.")
+    parser.add_argument(
+        "--foul-box-window",
+        type=int,
+        default=3,
+        help="Show the red foul/contact box only within this many sampled frames of the detected foul frame.",
+    )
     parser.add_argument("--contact-center-frac", type=float, default=0.6, help="Central time window searched for contact.")
     parser.add_argument(
         "--contact-motion-weight",
@@ -739,6 +745,7 @@ def _draw_overlay(
     saliency=None,
     saliency_rect=None,
     saliency_alpha: float = 0.45,
+    draw_contact: bool = True,
 ) -> np.ndarray:
     overlay = frame.copy()
     if saliency is not None and saliency_rect is not None:
@@ -757,20 +764,24 @@ def _draw_overlay(
             if kp[j, 2] >= kp_threshold:
                 cv2.circle(overlay, (int(kp[j, 0]), int(kp[j, 1])), 3, colour, -1)
 
-    if contact_box is not None:
+    if draw_contact and contact_box is not None:
         x1, y1, x2, y2 = contact_box
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 3)
-    if contact_point is not None:
+    if draw_contact and contact_point is not None:
         cx, cy = int(contact_point[0]), int(contact_point[1])
         cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
 
-    fine = assignment.fine if assignment is not None else "unknown"
-    coarse = assignment.coarse if assignment is not None else "unknown"
-    _put_label(overlay, f"Foul contact: {fine} ({coarse})", 24)
+    label_y = 24
+    if draw_contact:
+        fine = assignment.fine if assignment is not None else "unknown"
+        coarse = assignment.coarse if assignment is not None else "unknown"
+        _put_label(overlay, f"Foul contact: {fine} ({coarse})", label_y)
+        label_y += 28
     if context_text:
-        _put_label(overlay, f"Deep net: {context_text}", 52)
-    if bodypart_deep:
-        _put_label(overlay, f"Body part (deep head): {bodypart_deep}", 80)
+        _put_label(overlay, f"Deep net: {context_text}", label_y)
+        label_y += 28
+    if draw_contact and bodypart_deep:
+        _put_label(overlay, f"Body part (deep head): {bodypart_deep}", label_y)
     return overlay
 
 
@@ -824,37 +835,10 @@ def _write_foul_overlay_video(
     total = len(frames)
     for idx, (frame_index, frame) in enumerate(frames):
         frame_players = pose.estimate(frame)
-        frame_contact = find_pose_contact_frame(
-            frame,
-            frame_index,
-            frame_players,
-            keypoint_score_threshold=args.keypoint_score_threshold,
-            box_scale=args.contact_box_scale,
-            max_distance_ratio=args.max_contact_distance_ratio if args.require_two_players else 0.0,
-            center_weight=args.contact_center_weight,
-            saliency_fn=saliency_fn,
-            saliency_weight=args.saliency_weight if args.contact_source == "hybrid" else 0.0,
-        )
-        if (
-            frame_contact is not None
-            and args.contact_source == "hybrid"
-            and saliency_fn is not None
-            and saliency_fn(frame_contact.point[0], frame_contact.point[1]) < args.saliency_min
-        ):
-            frame_contact = None
-
-        if frame_contact is None:
-            frame_point = None
-            frame_box = None
-            frame_assignment = None
-        else:
-            frame_point = frame_contact.point
-            frame_box = list(frame_contact.box)
-            frame_assignment = (
-                assign_bodypart(frame_point, frame_players, keypoint_score_threshold=args.keypoint_score_threshold)
-                if frame_players
-                else None
-            )
+        show_contact = abs(frame_index - located["frame_index"]) <= max(args.foul_box_window, 0)
+        frame_point = located["contact_point"] if show_contact else None
+        frame_box = located["contact_box"] if show_contact else None
+        frame_assignment = assignment if show_contact else None
 
         overlay = _draw_overlay(
             frame,
@@ -868,6 +852,7 @@ def _write_foul_overlay_video(
             saliency=located.get("saliency"),
             saliency_rect=located.get("saliency_rect"),
             saliency_alpha=args.saliency_alpha,
+            draw_contact=show_contact,
         )
         if frame_index == located["frame_index"]:
             cv2.rectangle(overlay, (4, 4), (overlay.shape[1] - 5, overlay.shape[0] - 5), (255, 255, 255), 2)

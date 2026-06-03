@@ -126,6 +126,8 @@ Useful options:
   or close-up view.
 - `--render-video` / `--no-render-video`: MP4 foul-overlay output is enabled by
   default; use `--no-render-video` for still images only.
+- `--foul-box-window 3`: show the red foul/contact box only near the detected
+  foul frame. Use `0` for only the exact detected frame.
 - `--require-two-players`: skip actions when pose cannot find a clear two-player
   contact.
 - `--max-contact-distance-ratio 0.25`: require the two posed players to be very
