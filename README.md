@@ -1,198 +1,194 @@
+# Football Foul Detection Setup
 
+This project detects football fouls with a deep multi-view video model and then
+renders visual contact evidence with red boxes, pose overlays, body-part
+estimates, videos, and JSON summaries.
 
-# Video Assistant Referee System - VARS
+## 1. Create the Environment
 
-The Video Assistant Referee (VAR) has revolutionized association football, enabling referees to review incidents on the pitch, making informed decisions, and ensuring fairness. However, due to the lack of referees in many countries and the high cost of the VAR infrastructure, only professional leagues can benefit from it. 
-We propose a first step towards a fully automated “Video Assistant Referee System” (VARS) which could support or replace the current VAR.
+From the repository root:
 
-This repository contains:
- * the SoccerNet-MVFoul, a new multi-view video dataset containing video clips of fouls captured by multiple cameras, annotated with 10 properties.
- * the code for the VARS, a new multi-camera video recognition system for classifying the type of fouls and their severity. 
-* the VARS interface, which shows the ground truth of the action and the top 2 predictions for the foul classification task, and the offence and severity classification task with the corresponding confidence scores.
-
-For more information
-* Paper: [VARS: Video Assistant Referee System for Automated Soccer Decision Making from Multiple Views](https://arxiv.org/abs/2304.04617).
-
-
-![My Image](images/abstract_image.jpg)
-## SoccerNet-MVFoul
-
-Follow the [link](https://pypi.org/project/SoccerNet/) to easily download the SoccerNet pip package.
-
-If you want to download the data and annotations, you will need to fill a [NDA](https://docs.google.com/forms/d/e/1FAIpQLSfYFqjZNm4IgwGnyJXDPk2Ko_lZcbVtYX73w5lf6din5nxfmA/viewform) to get the password.
-
-Then use the API to downlaod the data:
-
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 ```
-from SoccerNet.Downloader import SoccerNetDownloader as SNdl
-mySNdl = SNdl(LocalDirectory="path/to/SoccerNet")
-mySNdl.downloadDataTask(task="mvfouls", split=["train","valid","test","challenge"], password="enter password")
-```
-To obtain the data in 720p, add version = "720p" to the input arguments. 
-Unzip each folder while maintaining the naming conventions. (Train, Valid, Test, Chall). If you face issues extracting data from the train_720p.zip folder, the error may come from using the default unzip extractor. Using the app "The Unarchiver" should enable you to unzip it successfully.
 
-The dataset consists of 3901 available actions. Each action is composed of at least two videos depicting the live action and at least one replay. 
-The dataset is divided into a training set (2916 actions), validation set (411 actions), test set (301 actions) and challenge set (273 actions without the annotations).
+Install PyTorch for your machine first. For a GPU machine, install the CUDA
+version that matches your driver from the PyTorch install page.
 
-![My Image](images/dataset_example.png)
+Then install the project dependencies:
 
-The actions are annotated with 10 different properties describing the characteristics of the foul from a referee
-perspective (e.g. the severity of the foul, the type of foul,
-etc.). \
-To ensure high-quality annotations, all these properties were manually annotated by a professional soccer referee with 6 years of experience and more than 300 official
-games.
-## VARS
-
-Our VARS is a multi-view multi-task video architecture, that automatically identifies the type of foul and their severity. 
-
-![My Image](images/pipeline_mvfoul.jpg)
-
-Our system encodes per-view video features (E), aggregates the view features (A), and classifies different properties of the foul action (C).
-
-Run the following lines to install all the dependencies:
-```
-conda create -n vars python=3.9
-
-conda activate vars
-
-Install Pytorch with CUDA : https://pytorch.org/get-started/locally/
-
-pip install SoccerNet
-
+```bash
 pip install -r requirements.txt
-
-pip install pyav
-
-```
-Unzip the dataset and to start the training, run the following command:
-
-```
-python main.py --path "path/to/dataset" 
-```
-You can download our pre-trained weights to recreate the baseline: https://drive.google.com/drive/folders/1N0Lv-lcpW8w34_iySc7pnlQ6eFMSDvXn?usp=share_link
-
-Run the following command:
-
-```
-python main.py --pooling_type "attention" --start_frame 63 --end_frame 87 --fps 17 --path "path/to/dataset" --pre_model "mvit_v2_s" --path_to_model_weights "14_model.pth.tar"
+pip install SoccerNet pyav
 ```
 
-The foul usually occurs around the 75th frame. You can trim the clips by using --start_frame or --end_frame to capture only the frames where the foul takes place.
+## 2. Download the Dataset
 
-## Deep-first foul recognition and contact boxes
+Set the SoccerNet password as an environment variable:
 
-This fork flips the earlier CV-first design. The foul decision now comes from a
-VARS-style deep multi-view video model, and the red contact boxes are a visual
-review layer for actions predicted as fouls.
-
-The cleaned project uses the original VARS video backbones:
-
-* `mvit_v2_s`
-* `r2plus1d_18`
-* `r3d_18`
-* `mc3_18`
-* `s3d`
-
-Install the added dependencies from the repository root:
-
-```
-pip install -r requirements.txt
+```bash
+export SOCCERNET_PASSWORD="<your SoccerNet password>"
 ```
 
-Download the MVFoul data without hard-coding the password:
+Download SoccerNet-MVFoul:
 
-```
-export SOCCERNET_PASSWORD=""
-python scripts/download_mvfoul.py --output data/SoccerNet --version 720p
+```bash
+python scripts/download_mvfoul.py \
+  --output data/SoccerNet \
+  --version 720p
 ```
 
-Stage-one fine-tuning:
+After extraction, the dataset folder should look like:
 
+```text
+data/SoccerNet/
+  Train/
+  Valid/
+  Test/
+  Chall/
 ```
+
+## 3. Add Model Weights
+
+Place the VARS checkpoint in:
+
+```text
+VARS model/14_model.pth.tar
+```
+
+The main scripts below assume that path.
+
+## 4. Run the Deep Foul Detector
+
+From the repository root:
+
+```bash
 cd "VARS model"
+
 python main.py \
   --path ../data/SoccerNet \
   --pre_model mvit_v2_s \
   --pooling_type attention \
   --start_frame 65 \
   --end_frame 85 \
-  --fps 21
+  --fps 21 \
+  --path_to_model_weights 14_model.pth.tar
+
+cd ..
 ```
 
-Render red contact boxes only for model-predicted fouls:
+This produces prediction JSON files such as:
 
+```text
+VARS model/predicitions_test.json
+VARS model/predicitions_valid.json
 ```
+
+## 5. Render Simple Red Contact Boxes
+
+Use the prediction JSON to render red boxes only for actions predicted as fouls:
+
+```bash
 python scripts/visualize_foul_contact_boxes.py \
   --dataset data/SoccerNet \
   --predictions "VARS model/predicitions_test.json" \
   --splits Test \
-  --output outputs/model_gated_contact_boxes
+  --output outputs/model_gated_contact_boxes \
+  --contact-pause-seconds 1.0
 ```
 
-See [docs/classical_cv_pipeline.md](docs/classical_cv_pipeline.md) for the full
-baseline, evaluation, contact-box, and body-part contact commands.
+## 6. Run Pose and Body-Part Contact Visualization
 
-## VARS interface
+Run the full contact visualization pipeline:
 
-The VARS interface enables easy access to all available
-perspectives for a particular action. The multi-task VARS,
-which achieved the best results on the test set, is built directly into the interface, allowing for immediate analysis of
-selected videos. The VARS interface offers top two predictions for the type of foul classification, as well as the offence and severity classification for the selected videos. Furthermore, for each prediction, the VARS interface shows the confidence score of his prediction.
-
-![My Image](images/vars_interface.png)
-
-Run the following lines to instal all the dependencies
+```bash
+python scripts/recognize_foul_bodypart.py \
+  --dataset data/SoccerNet \
+  --splits Test \
+  --weights "VARS model/14_model.pth.tar" \
+  --pre-model mvit_v2_s \
+  --pooling-type attention \
+  --start-frame 65 \
+  --end-frame 85 \
+  --fps 21 \
+  --output outputs/foul_bodypart_test_all_videos \
+  --device cuda \
+  --contact-source hybrid \
+  --clip-selection replay-closeup \
+  --include-original-clip \
+  --all-selected-clips \
+  --foul-box-window 3 \
+  --eval
 ```
-conda create -n vars python=3.9
 
-conda activate vars
+Main outputs:
 
-pip install -r requirements.txt
-pip install av
+```text
+outputs/foul_bodypart_test_all_videos/index.json
+outputs/foul_bodypart_test_all_videos/bodypart_eval.json
+outputs/foul_bodypart_test_all_videos/<split>/action_<id>/clip_<n>_foul_box.mp4
+outputs/foul_bodypart_test_all_videos/<split>/action_<id>/clip_<n>_foul_detection.mp4
+outputs/foul_bodypart_test_all_videos/<split>/action_<id>/clip_<n>_contact_bodypart.png
+outputs/foul_bodypart_test_all_videos/<split>/action_<id>/clip_<n>_bodypart.json
 ```
-Download the weights of the model: https://drive.google.com/drive/folders/1N0Lv-lcpW8w34_iySc7pnlQ6eFMSDvXn?usp=share_link
 
-And save the 14_model.pth.tar file in the folder "interface".
+## 7. Optional: Train the Body-Part Head
 
-Once the environment is ready, you can simply run the interface with the following command:
+Extract frozen deep features:
+
+```bash
+python scripts/extract_deep_features.py \
+  --dataset data/SoccerNet \
+  --splits Train Valid \
+  --weights "VARS model/14_model.pth.tar" \
+  --pre-model mvit_v2_s \
+  --output outputs/deep_features
 ```
-python main.py
+
+Train the small Upper/Under body-part classifier:
+
+```bash
+python scripts/train_bodypart_head.py \
+  --train-features outputs/deep_features/Train_bodypart_features.pt \
+  --valid-features outputs/deep_features/Valid_bodypart_features.pt \
+  --output outputs/bodypart_head/bodypart_head.pth \
+  --report outputs/bodypart_head/bodypart_head_report.json
 ```
-Then select one or several clips in the folder "Dataset".
 
+Use it during contact visualization:
 
-## Demo
-The VARS gives his top two predictions with the corresponding confidence score.
-
-Example 1:
-![My Demo](images/HighLeg_RedCard_GIF.gif)
-
-Example 2:
-![My Demo](images/Tackling_YellowCard_GIF.gif)
-
-## License
-See the [License](LICENSE) file for details.
-
-## Youtube video
-
-Check out our video tutorial on the MV-Foul challenge!
-
-[![IMAGE ALT TEXT HERE](images/Thumbnail.jpg)](https://youtu.be/Ir-6D3j_lkA?si=Uwni8jngdsDQrf6w)
-
-## Citation
-
-For further information check out our [paper](https://arxiv.org/abs/2304.04617) and supplementary material.
-
-Please cite our work if you use our dataset or code:
+```bash
+python scripts/recognize_foul_bodypart.py \
+  --dataset data/SoccerNet \
+  --splits Test \
+  --weights "VARS model/14_model.pth.tar" \
+  --bodypart-head outputs/bodypart_head/bodypart_head.pth \
+  --output outputs/foul_bodypart_with_head \
+  --device cuda \
+  --contact-source hybrid \
+  --clip-selection replay-closeup \
+  --include-original-clip \
+  --all-selected-clips \
+  --foul-box-window 3 \
+  --eval
 ```
-@InProceedings{Held2023VARS,
-    author    = {Held, Jan and Cioppa, Anthony and Giancola, Silvio and Hamdi, Abdullah and Ghanem, Bernard and Van Droogenbroeck, Marc},
-    title     = {{VARS}: Video Assistant Referee System for Automated Soccer Decision Making From Multiple Views},
-    booktitle = cvsports,
-    month     = Jun,
-    year      = {2023},
-	publisher = ieee,
-	address = seattle,
-    pages     = {5085-5096}
-}
+
+## 8. Useful Existing Result Folders
+
+```text
+outputs/foul_bodypart_replays_plus_original_windowed/
+outputs/foul_bodypart_replays_plus_original_windowed_chall/
+outputs/foul_bodypart_test_all_videos/
+outputs/bodypart_head/
+```
+
+## 9. Project Documents
+
+```text
+docs/classical_cv_pipeline.md
+docs/foul_detection_final_results_presentation.pptx
+docs/computer_vision_foul_detection_paper.docx
+computer_vision_foul_detection_paper.pdf
 ```

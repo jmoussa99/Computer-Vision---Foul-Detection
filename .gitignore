@@ -5,6 +5,7 @@ venv/
 env/
 .DS_Store
 data/
+docs/
 outputs/
 models/
 *.pth
